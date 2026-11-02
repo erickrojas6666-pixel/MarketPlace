@@ -13,53 +13,70 @@ use Inertia\Response;
 
 class ServicioController extends Controller
 {
-    // Catálogo público
+    /**
+     * Catálogo público de servicios (para el cliente).
+     */
     public function index(): Response
     {
+        $servicios = Servicio::with(['perfilPrestador.user', 'categoria'])
+            ->where('activo', true)
+            ->latest()
+            ->get();
+
         return Inertia::render('Servicios/Index', [
+            'servicios'  => $servicios,
             'categorias' => Categoria::all(),
-            'servicios' => Servicio::with(['perfilesPrestador.user', 'categoria'])
-                ->where('activo', true)
-                ->latest()
-                ->get(),
         ]);
     }
 
-    // Guardar nuevo servicio
+    /**
+     * Guardar un nuevo servicio publicado por un prestador.
+     */
     public function store(Request $request): RedirectResponse
     {
-        $request->validate([
-            'categoria_id' => 'required|exists:categorias,id',
-            'titulo' => 'required|string|max:255',
-            'descripcion' => 'required|string',
-            'precio_base' => 'nullable|numeric|min:0',
-        ]);
+        $user = Auth::user();
 
-        $perfil = PerfilPrestador::where('user_id', Auth::id())->firstOrFail();
+        $perfil = PerfilPrestador::where('user_id', $user->id)->first();
+
+        if (!$perfil) {
+            return redirect()->back()->with('error', 'No se encontró un perfil de prestador.');
+        }
+
+        $validated = $request->validate([
+            'nombre'       => 'required|string|max:255',
+            'descripcion'  => 'required|string|max:1000',
+            'precio'       => 'nullable|numeric|min:0',
+            'categoria_id' => 'required|exists:categorias,id',
+        ]);
 
         Servicio::create([
             'perfil_prestador_id' => $perfil->id,
-            'categoria_id' => $request->categoria_id,
-            'titulo' => $request->titulo,
-            'descripcion' => $request->descripcion,
-            'precio_base' => $request->precio_base,
-            'activo' => true,
+            'categoria_id'        => $validated['categoria_id'],
+            'titulo'              => $validated['nombre'],      // La BD usa 'titulo'
+            'descripcion'         => $validated['descripcion'],
+            'precio_base'         => $validated['precio'] ?? 0, // La BD usa 'precio_base'
+            'activo'              => true,
         ]);
 
-        return redirect()->route('dashboard')->with('success', 'Servicio publicado con éxito.');
+        return redirect()->back()->with('success', '¡Servicio publicado con éxito!');
     }
-
-    // Cambiar estado activo/inactivo
+    /**
+     * Activar o desactivar la visibilidad de un servicio.
+     */
     public function toggleState(Servicio $servicio): RedirectResponse
     {
-        $perfil = PerfilPrestador::where('user_id', Auth::id())->firstOrFail();
+        $user = Auth::user();
 
-        if ($servicio->perfil_prestador_id !== $perfil->id) {
-            abort(403);
+        // Verificar propiedad del servicio
+        if ($servicio->perfilPrestador->user_id !== $user->id) {
+            abort(403, 'No tienes permiso para modificar este servicio.');
         }
 
-        $servicio->update(['activo' => !$servicio->activo]);
+        $servicio->update([
+            'activo' => !$servicio->activo,
+        ]);
 
-        return redirect()->back();
+        $estadoTexto = $servicio->activo ? 'activado' : 'desactivado';
+        return redirect()->back()->with('success', "Servicio {$estadoTexto} correctamente.");
     }
 }

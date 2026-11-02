@@ -6,26 +6,15 @@ use App\Models\Categoria;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Str;
-use Inertia\Inertia;
-use Inertia\Response;
 
 class CategoriaController extends Controller
 {
-    // Listado de categorías (útil para el panel de administración)
-    public function index(): Response
-    {
-        return Inertia::render('Admin/Categorias/Index', [
-            'categorias' => Categoria::withCount('servicios')->get(),
-        ]);
-    }
-
-    // Guardar una nueva categoría
     public function store(Request $request): RedirectResponse
     {
         $request->validate([
-            'nombre' => 'required|string|max:255|unique:categorias,nombre',
-            'descripcion' => 'nullable|string',
-            'icono' => 'nullable|string|max:100',
+            'nombre' => 'required|string|max:100|unique:categorias,nombre',
+            'descripcion' => 'nullable|string|max:255',
+            'icono' => 'nullable|string|max:50',
         ]);
 
         Categoria::create([
@@ -35,16 +24,15 @@ class CategoriaController extends Controller
             'icono' => $request->icono,
         ]);
 
-        return redirect()->back()->with('success', 'Categoría creada con éxito.');
+        return redirect()->back()->with('success', 'Categoría creada exitosamente.');
     }
 
-    // Actualizar una categoría existente
     public function update(Request $request, Categoria $categoria): RedirectResponse
     {
         $request->validate([
-            'nombre' => 'required|string|max:255|unique:categorias,nombre,' . $categoria->id,
-            'descripcion' => 'nullable|string',
-            'icono' => 'nullable|string|max:100',
+            'nombre' => 'required|string|max:100|unique:categorias,nombre,' . $categoria->id,
+            'descripcion' => 'nullable|string|max:255',
+            'icono' => 'nullable|string|max:50',
         ]);
 
         $categoria->update([
@@ -54,12 +42,16 @@ class CategoriaController extends Controller
             'icono' => $request->icono,
         ]);
 
-        return redirect()->back()->with('success', 'Categoría actualizada con éxito.');
+        return redirect()->back()->with('success', 'Categoría actualizada exitosamente.');
     }
 
-    // Eliminar una categoría
     public function destroy(Categoria $categoria): RedirectResponse
     {
+        // Opcional: verificar si tiene servicios vinculados antes de eliminar
+        if ($categoria->servicios()->count() > 0) {
+            return redirect()->back()->with('error', 'No se puede eliminar la categoría porque tiene servicios vinculados.');
+        }
+
         $categoria->delete();
 
         return redirect()->back()->with('success', 'Categoría eliminada con éxito.');

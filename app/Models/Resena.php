@@ -7,6 +7,7 @@
 namespace App\Models;
 
 use Carbon\Carbon;
+use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 
 /**
@@ -41,15 +42,13 @@ class Resena extends Model
 	];
 
 	protected $fillable = [
-		'pedido_id',
-		'autor_id',
-		'destinatario_id',
-		'tipo',
-		'puntuacion',
-		'comentario',
-		'publicada_en'
-	];
-
+    'pedido_id',
+    'cliente_id',
+    'prestador_id',
+    'servicio_id',
+    'calificacion',
+    'comentario',
+];
 	public function user()
 	{
 		return $this->belongsTo(User::class, 'destinatario_id');
@@ -59,4 +58,9 @@ class Resena extends Model
 	{
 		return $this->belongsTo(Pedido::class);
 	}
+
+    public function cliente()
+    {
+        return $this->belongsTo(User::class, 'cliente_id');
+    }
 }

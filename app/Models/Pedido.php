@@ -1,13 +1,10 @@
 <?php
 
-/**
- * Created by Reliese Model.
- */
-
 namespace App\Models;
 
 use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Collection;
+use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 
 /**
@@ -15,21 +12,23 @@ use Illuminate\Database\Eloquent\Model;
  * 
  * @property int $id
  * @property int $cliente_id
- * @property int $prestador_id
+ * @property int|null $prestador_id
  * @property int $servicio_id
- * @property int $nivel_id
- * @property int $direccion_id
+ * @property int|null $nivel_id
+ * @property int|null $direccion_id
  * @property string $estado
- * @property float $precio_total
- * @property float $comision_plataforma
- * @property Carbon $agendado_para
+ * @property string|null $direccion_servicio
+ * @property float|null $precio_total
+ * @property float|null $comision_plataforma
+ * @property Carbon|null $fecha_programada
+ * @property Carbon|null $agendado_para
  * @property Carbon|null $created_at
  * @property Carbon|null $updated_at
  * 
  * @property User $user
- * @property Direccione $direccione
- * @property NivelesServicio $niveles_servicio
- * @property PerfilesPrestador $perfiles_prestador
+ * @property Direccione|null $direccione
+ * @property NivelesServicio|null $niveles_servicio
+ * @property PerfilesPrestador|null $perfiles_prestador
  * @property Servicio $servicio
  * @property Collection|Cotizacione[] $cotizaciones
  * @property Disputa|null $disputa
@@ -41,78 +40,103 @@ use Illuminate\Database\Eloquent\Model;
  */
 class Pedido extends Model
 {
-	protected $table = 'pedidos';
+    use HasFactory;
 
-	protected $casts = [
-		'cliente_id' => 'int',
-		'prestador_id' => 'int',
-		'servicio_id' => 'int',
-		'nivel_id' => 'int',
-		'direccion_id' => 'int',
-		'precio_total' => 'float',
-		'comision_plataforma' => 'float',
-		'agendado_para' => 'datetime'
-	];
+    protected $table = 'pedidos';
 
-	protected $fillable = [
-		'cliente_id',
-		'prestador_id',
-		'servicio_id',
-		'nivel_id',
-		'direccion_id',
-		'estado',
-		'precio_total',
-		'comision_plataforma',
-		'agendado_para'
-	];
+    protected $casts = [
+        'cliente_id'          => 'int',
+        'prestador_id'        => 'int',
+        'servicio_id'         => 'int',
+        'nivel_id'            => 'int',
+        'direccion_id'        => 'int',
+        'precio_total'        => 'float',
+        'comision_plataforma' => 'float',
+        'fecha_programada'    => 'datetime',
+        'agendado_para'       => 'datetime',
+    ];
 
-	public function user()
-	{
-		return $this->belongsTo(User::class, 'cliente_id');
-	}
+    protected $fillable = [
+        'cliente_id',
+        'prestador_id',
+        'servicio_id',
+        'nivel_id',
+        'direccion_id',
+        'estado',
+        'direccion_servicio',
+        'precio_total',
+        'comision_plataforma',
+        'fecha_programada',
+        'agendado_para',
+    ];
 
-	public function direccione()
-	{
-		return $this->belongsTo(Direccione::class, 'direccion_id');
-	}
+    // --- RELACIONES ORIGINALES ---
 
-	public function niveles_servicio()
-	{
-		return $this->belongsTo(NivelesServicio::class, 'nivel_id');
-	}
+    public function user()
+    {
+        return $this->belongsTo(User::class, 'cliente_id');
+    }
 
-	public function perfiles_prestador()
-	{
-		return $this->belongsTo(PerfilesPrestador::class, 'prestador_id');
-	}
+    public function direccione()
+    {
+        return $this->belongsTo(Direccione::class, 'direccion_id');
+    }
 
-	public function servicio()
-	{
-		return $this->belongsTo(Servicio::class);
-	}
+    public function niveles_servicio()
+    {
+        return $this->belongsTo(NivelesServicio::class, 'nivel_id');
+    }
 
-	public function cotizaciones()
-	{
-		return $this->hasMany(Cotizacione::class);
-	}
+    public function perfiles_prestador()
+    {
+        return $this->belongsTo(PerfilPrestador::class, 'prestador_id');
+    }
 
-	public function disputa()
-	{
-		return $this->hasOne(Disputa::class);
-	}
+    public function servicio()
+    {
+        return $this->belongsTo(Servicio::class);
+    }
 
-	public function mensajes()
-	{
-		return $this->hasMany(Mensaje::class);
-	}
+    public function cotizaciones()
+    {
+        return $this->hasMany(Cotizacione::class);
+    }
 
-	public function pago()
-	{
-		return $this->hasOne(Pago::class);
-	}
+    public function disputa()
+    {
+        return $this->hasOne(Disputa::class);
+    }
 
-	public function resenas()
-	{
-		return $this->hasMany(Resena::class);
-	}
+    public function mensajes()
+    {
+        return $this->hasMany(Mensaje::class);
+    }
+
+    public function pago()
+    {
+        return $this->hasOne(Pago::class);
+    }
+
+    public function resenas()
+    {
+        return $this->hasMany(Resena::class);
+    }
+
+    // --- ALIAS Y COMPATIBILIDAD CON VISTAS VUE/INERTIA ---
+
+    /**
+     * Alias de la relación cliente (mapea a la relación user)
+     */
+    public function cliente()
+    {
+        return $this->belongsTo(User::class, 'cliente_id');
+    }
+
+    /**
+     * Alias en singular para obtener la última reseña del pedido
+     */
+    public function resena()
+    {
+        return $this->hasOne(Resena::class);
+    }
 }
