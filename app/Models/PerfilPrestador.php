@@ -41,13 +41,12 @@ class PerfilPrestador extends Model
 	];
 
 	protected $fillable = [
-		'user_id',
-		'descripcion',
-		'ubicacion_aproximada',
-		'estado_verificacion',
-		'motivo_rechazo',
-		'es_pro'
-	];
+        'user_id',
+        'descripcion',
+        'ubicacion_aproximada',
+        'estado_verificacion',
+        'es_pro',
+    ];
 
 	public function user()
 	{

@@ -4,8 +4,8 @@ namespace App\Http\Controllers\Admin;
 
 use App\Http\Controllers\Controller;
 use App\Models\PerfilPrestador;
-use Illuminate\Http\RedirectResponse;
 use App\Notifications\EstadoVerificacionNotification;
+use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Inertia\Inertia;
 use Inertia\Response;
@@ -19,7 +19,12 @@ class VerificacionPrestadorController extends Controller
     {
         $estado = $request->query('estado', 'pendiente');
 
-        $prestadores = PerfilPrestador::with(['user', 'documentos'])
+        $relations = ['user'];
+        if (method_exists(PerfilPrestador::class, 'documentos')) {
+            $relations[] = 'documentos';
+        }
+
+        $prestadores = PerfilPrestador::with($relations)
             ->when($estado !== 'todos', function ($query) use ($estado) {
                 return $query->where('estado_verificacion', $estado);
             })
@@ -28,7 +33,7 @@ class VerificacionPrestadorController extends Controller
             ->withQueryString();
 
         return Inertia::render('Admin/Prestadores/Index', [
-            'prestadores' => $prestadores,
+            'prestadores'  => $prestadores,
             'filtroEstado' => $estado,
         ]);
     }
@@ -39,20 +44,32 @@ class VerificacionPrestadorController extends Controller
     public function updateStatus(Request $request, PerfilPrestador $perfil): RedirectResponse
     {
         $request->validate([
-            'estado' => 'required|in:aprobado,rechazado,pendiente',
-            'motivo_rechazo' => 'required_if:estado,rechazado|nullable|string|max:500',
+            'estado' => 'required|string',
         ]);
 
+        // Mapeo defensivo: el frontend envía 'aprobado', pero la BD MySQL espera 'verificado'
+        $estadoInput = $request->estado;
+        if ($estadoInput === 'aprobado') {
+            $nuevoEstado = 'verificado';
+        } else {
+            $nuevoEstado = $estadoInput;
+        }
+
+        // Validar que coincida con los valores reales del ENUM en MySQL
+        if (!in_array($nuevoEstado, ['pendiente', 'verificado', 'rechazado'])) {
+            return redirect()->back()->with('error', 'Estado de verificación no válido.');
+        }
+
+        // Actualizar ÚNICAMENTE la columna que existe en la BD
         $perfil->update([
-            'estado_verificacion' => $request->estado,
-            'motivo_rechazo' => $request->estado === 'rechazado' ? $request->motivo_rechazo : null,
+            'estado_verificacion' => $nuevoEstado,
         ]);
 
-        // Enviar notificación al usuario asociado al perfil
+        // Notificar al usuario prestador en la tabla 'notifications'
         if ($perfil->user) {
             $perfil->user->notify(new EstadoVerificacionNotification($perfil));
         }
 
-        return redirect()->back()->with('success', "El estado del prestador ha sido actualizado a '{$request->estado}'.");
+        return redirect()->back()->with('success', "El estado del prestador ha sido actualizado a '{$nuevoEstado}'.");
     }
 }

@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\Admin\AdminDashboardController;
+use App\Http\Controllers\Admin\UsuarioAdminController;
 use App\Http\Controllers\Admin\VerificacionPrestadorController;
 use App\Http\Controllers\Api\UbicacionController;
 use App\Http\Controllers\CategoriaController;
@@ -11,6 +12,7 @@ use App\Http\Controllers\ProfileController;
 use App\Http\Controllers\ResenaController;
 use App\Http\Controllers\ServicioController;
 use Illuminate\Foundation\Application;
+use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Route;
 use Inertia\Inertia;
 
@@ -27,18 +29,29 @@ Route::get('/', function () {
 // Catálogo público de servicios
 Route::get('/servicios', [ServicioController::class, 'index'])->name('servicios.index');
 
-// Dashboard principal
-Route::get('/dashboard', DashboardController::class)
-    ->middleware(['auth', 'verified'])
-    ->name('dashboard');
+Route::get('/dashboard', function (\Illuminate\Http\Request $request) {
+    $user = Auth::user();
 
+    // Si el usuario es Admin / SuperAdmin, lo redirige directo a su panel
+    if ($user && method_exists($user, 'hasRole') && $user->hasRole(['admin', 'superadmin', 'Admin', 'SuperAdmin'])) {
+        return redirect()->route('admin.dashboard');
+    }
+
+    if ($user && ($user->is_admin ?? false)) {
+        return redirect()->route('admin.dashboard');
+    }
+
+    // Para clientes y prestadores comunes, invoca el DashboardController pasándole el $request
+    return app(DashboardController::class)($request);
+})->middleware(['auth', 'verified'])->name('dashboard');
 // --------------------------------------------------------------------------
 // Rutas para Usuarios Autenticados (Clientes y Prestadores)
 // --------------------------------------------------------------------------
 Route::middleware('auth')->group(function () {
 
+    // Notificaciones
     Route::post('/notificaciones/marcar-leidas', function () {
-        \Illuminate\Support\Facades\Auth::user()->unreadNotifications->markAsRead();
+        Auth::user()->unreadNotifications->markAsRead();
         return redirect()->back()->with('success', 'Notificaciones marcadas como leídas.');
     })->name('notificaciones.marcarLeidas');
 
@@ -79,10 +92,11 @@ Route::middleware(['auth', 'role:admin|superadmin|Admin|SuperAdmin'])
 
         // Verificación de Prestadores
         Route::get('/prestadores', [VerificacionPrestadorController::class, 'index'])->name('prestadores.index');
-        Route::patch('/prestadores/{perfil}/verificacion', [VerificacionPrestadorController::class, 'updateStatus'])->name('prestadores.verificacion');
+        Route::patch('/prestadores/{perfil}/estado', [VerificacionPrestadorController::class, 'updateStatus'])->name('prestadores.updateStatus');
 
         // Gestión CRUD de Categorías
         Route::resource('categorias', CategoriaController::class)->except(['show', 'create', 'edit']);
+        Route::resource('usuarios', UsuarioAdminController::class)->except(['create', 'edit', 'show']);
     });
 
 require __DIR__.'/auth.php';
