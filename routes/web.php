@@ -12,11 +12,14 @@ use App\Http\Controllers\ProfileController;
 use App\Http\Controllers\ResenaController;
 use App\Http\Controllers\ServicioController;
 use Illuminate\Foundation\Application;
+use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Route;
 use Inertia\Inertia;
 
-// Vista pública de bienvenida
+// --------------------------------------------------------------------------
+// Rutas Públicas
+// --------------------------------------------------------------------------
 Route::get('/', function () {
     return Inertia::render('Welcome', [
         'canLogin'       => Route::has('login'),
@@ -29,10 +32,13 @@ Route::get('/', function () {
 // Catálogo público de servicios
 Route::get('/servicios', [ServicioController::class, 'index'])->name('servicios.index');
 
-Route::get('/dashboard', function (\Illuminate\Http\Request $request) {
+// --------------------------------------------------------------------------
+// Dashboard Principal (Con Redirección Inteligente para Administradores)
+// --------------------------------------------------------------------------
+Route::get('/dashboard', function (Request $request) {
     $user = Auth::user();
 
-    // Si el usuario es Admin / SuperAdmin, lo redirige directo a su panel
+    // Redirige al panel administrativo si tiene rol o marca de Admin / SuperAdmin
     if ($user && method_exists($user, 'hasRole') && $user->hasRole(['admin', 'superadmin', 'Admin', 'SuperAdmin'])) {
         return redirect()->route('admin.dashboard');
     }
@@ -41,21 +47,22 @@ Route::get('/dashboard', function (\Illuminate\Http\Request $request) {
         return redirect()->route('admin.dashboard');
     }
 
-    // Para clientes y prestadores comunes, invoca el DashboardController pasándole el $request
+    // Para clientes y prestadores, carga el Dashboard regular
     return app(DashboardController::class)($request);
 })->middleware(['auth', 'verified'])->name('dashboard');
+
 // --------------------------------------------------------------------------
 // Rutas para Usuarios Autenticados (Clientes y Prestadores)
 // --------------------------------------------------------------------------
 Route::middleware('auth')->group(function () {
 
-    // Notificaciones
+    // Notificaciones del Sistema
     Route::post('/notificaciones/marcar-leidas', function () {
         Auth::user()->unreadNotifications->markAsRead();
         return redirect()->back()->with('success', 'Notificaciones marcadas como leídas.');
     })->name('notificaciones.marcarLeidas');
 
-    // Perfil de Usuario
+    // Perfil General de Usuario
     Route::get('/profile', [ProfileController::class, 'edit'])->name('profile.edit');
     Route::patch('/profile', [ProfileController::class, 'update'])->name('profile.update');
     Route::delete('/profile', [ProfileController::class, 'destroy'])->name('profile.destroy');
@@ -63,24 +70,25 @@ Route::middleware('auth')->group(function () {
     // API de Geocodificación (Proxy Nominatim)
     Route::get('/api/buscar-ubicacion', [UbicacionController::class, 'buscarUbicacion'])->name('api.ubicacion');
 
-    // Gestión de Pedidos
+    // Gestión de Pedidos y Estado
+    Route::get('/pedidos', [PedidoController::class, 'index'])->name('pedidos.index');
     Route::post('/pedidos', [PedidoController::class, 'store'])->name('pedidos.store');
     Route::patch('/pedidos/{pedido}/estado', [PedidoController::class, 'updateEstado'])->name('pedidos.updateEstado');
 
-    // Publicación y Gestión de Servicios (Prestadores)
+    // Publicación y Toggle de Servicios (Prestadores)
     Route::post('/servicios', [ServicioController::class, 'store'])->name('servicios.store');
     Route::patch('/servicios/{servicio}/toggle', [ServicioController::class, 'toggleState'])->name('servicios.toggle');
 
     // Reseñas y Calificaciones (Clientes)
     Route::post('/resenas', [ResenaController::class, 'store'])->name('resenas.store');
 
-    // Perfil extendido de Prestador
+    // Perfil Profesional y Servicios de Prestador
     Route::get('/prestador/perfil', [PerfilPrestadorController::class, 'edit'])->name('prestador.perfil.edit');
     Route::post('/prestador/perfil', [PerfilPrestadorController::class, 'update'])->name('prestador.perfil.update');
 });
 
 // --------------------------------------------------------------------------
-// Panel de Administración (SOLO Admin / SuperAdmin)
+// Panel de Administración (SOLO Roles de Gestión)
 // --------------------------------------------------------------------------
 Route::middleware(['auth', 'role:admin|superadmin|Admin|SuperAdmin'])
     ->prefix('admin')
@@ -94,9 +102,9 @@ Route::middleware(['auth', 'role:admin|superadmin|Admin|SuperAdmin'])
         Route::get('/prestadores', [VerificacionPrestadorController::class, 'index'])->name('prestadores.index');
         Route::patch('/prestadores/{perfil}/estado', [VerificacionPrestadorController::class, 'updateStatus'])->name('prestadores.updateStatus');
 
-        // Gestión CRUD de Categorías
+        // CRUDs de Gestión
         Route::resource('categorias', CategoriaController::class)->except(['show', 'create', 'edit']);
-        Route::resource('usuarios', UsuarioAdminController::class)->except(['create', 'edit', 'show']);
+        Route::resource('usuarios', UsuarioAdminController::class)->except(['show', 'create', 'edit']);
     });
 
 require __DIR__.'/auth.php';

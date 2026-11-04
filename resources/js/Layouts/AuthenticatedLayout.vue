@@ -1,20 +1,29 @@
 <script setup>
-import { ref } from 'vue'
+import { ref, computed } from 'vue'
 import ApplicationLogo from '@/Components/ApplicationLogo.vue'
 import Dropdown from '@/Components/Dropdown.vue'
 import DropdownLink from '@/Components/DropdownLink.vue'
 import NavLink from '@/Components/NavLink.vue'
 import ResponsiveNavLink from '@/Components/ResponsiveNavLink.vue'
-import { Link } from '@inertiajs/vue3'
+import { Link, usePage } from '@inertiajs/vue3'
 import Toast from '@/Components/Toast.vue'
 
 const showingNavigationDropdown = ref(false)
+const page = usePage()
+
+// Comprueba si el usuario tiene rol de administración
+const esAdmin = computed(() => {
+  const user = page.props.auth?.user
+  if (!user) return false
+  if (user.is_admin) return true
+  return user.roles?.some(r => ['admin', 'superadmin', 'Admin', 'SuperAdmin'].includes(r.name))
+})
 </script>
 
 <template>
   <div>
-    <div class="min-h-screen bg-gray-100">
-      <nav class="border-b border-gray-100 bg-white">
+    <div class="min-h-screen bg-gray-100 dark:bg-gray-900">
+      <nav class="border-b border-gray-100 dark:border-gray-800 bg-white dark:bg-gray-800">
         <!-- Primary Navigation Menu -->
         <div class="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
           <div class="flex h-16 justify-between">
@@ -22,7 +31,7 @@ const showingNavigationDropdown = ref(false)
               <!-- Logo -->
               <div class="flex shrink-0 items-center">
                 <Link :href="route('dashboard')">
-                  <ApplicationLogo class="block h-9 w-auto fill-current text-gray-800" />
+                  <ApplicationLogo class="block h-9 w-auto fill-current text-gray-800 dark:text-gray-200" />
                 </Link>
               </div>
 
@@ -34,18 +43,34 @@ const showingNavigationDropdown = ref(false)
                 >
                   Inicio
                 </NavLink>
+
+                <NavLink
+                  :href="route('servicios.index')"
+                  :active="route().current('servicios.index')"
+                >
+                  Explorar Servicios
+                </NavLink>
+
+                <!-- Mostrar "Perfil Prestador" SOLO a usuarios que no son Administradores -->
+                <NavLink
+                  v-if="!esAdmin"
+                  :href="route('prestador.perfil.edit')"
+                  :active="route().current('prestador.perfil.edit')"
+                >
+                  Perfil Prestador
+                </NavLink>
               </div>
             </div>
 
             <div class="hidden sm:ms-6 sm:flex sm:items-center">
-              <!-- Settings Dropdown -->
+              <!-- Settings Dropdown (Escritorio) -->
               <div class="relative ms-3">
                 <Dropdown align="right" width="48">
                   <template #trigger>
                     <span class="inline-flex rounded-md">
                       <button
                         type="button"
-                        class="inline-flex items-center rounded-md border border-transparent bg-white px-3 py-2 text-sm font-medium leading-4 text-gray-500 transition duration-150 ease-in-out hover:text-gray-700 focus:outline-none"
+                        class="inline-flex items-center rounded-md border border-transparent bg-white dark:bg-gray-800 px-3 py-2 text-sm font-medium leading-4 text-gray-500 dark:text-gray-400 transition duration-150 ease-in-out hover:text-gray-700 dark:hover:text-gray-300 focus:outline-none"
                       >
                         {{ $page.props.auth?.user?.nombre || $page.props.auth?.user?.name }}
 
@@ -66,26 +91,32 @@ const showingNavigationDropdown = ref(false)
                   </template>
 
                   <template #content>
-                    <DropdownLink :href="route('profile.edit')">
-                      Profile
+                    <!-- Opción prestador condicional -->
+                    <DropdownLink v-if="!esAdmin" :href="route('prestador.perfil.edit')">
+                      Perfil de Prestador
                     </DropdownLink>
+
+                    <DropdownLink :href="route('profile.edit')">
+                      Ajustes de Cuenta
+                    </DropdownLink>
+
                     <DropdownLink
                       :href="route('logout')"
                       method="post"
                       as="button"
                     >
-                      Log Out
+                      Cerrar Sesión
                     </DropdownLink>
                   </template>
                 </Dropdown>
               </div>
             </div>
 
-            <!-- Hamburger -->
+            <!-- Hamburger (Móvil) -->
             <div class="-me-2 flex items-center sm:hidden">
               <button
                 @click="showingNavigationDropdown = !showingNavigationDropdown"
-                class="inline-flex items-center justify-center rounded-md p-2 text-gray-400 transition duration-150 ease-in-out hover:bg-gray-100 hover:text-gray-500 focus:bg-gray-100 focus:text-gray-500 focus:outline-none"
+                class="inline-flex items-center justify-center rounded-md p-2 text-gray-400 hover:bg-gray-100 hover:text-gray-500 focus:outline-none transition"
               >
                 <svg
                   class="h-6 w-6"
@@ -119,7 +150,7 @@ const showingNavigationDropdown = ref(false)
           </div>
         </div>
 
-        <!-- Responsive Navigation Menu -->
+        <!-- Responsive Navigation Menu (Móvil) -->
         <div
           :class="{
             block: showingNavigationDropdown,
@@ -134,12 +165,19 @@ const showingNavigationDropdown = ref(false)
             >
               Dashboard
             </ResponsiveNavLink>
+
+            <ResponsiveNavLink
+              :href="route('servicios.index')"
+              :active="route().current('servicios.index')"
+            >
+              Explorar Servicios
+            </ResponsiveNavLink>
           </div>
 
           <!-- Responsive Settings Options -->
-          <div class="border-t border-gray-200 pb-1 pt-4">
+          <div class="border-t border-gray-200 dark:border-gray-700 pb-1 pt-4">
             <div class="px-4">
-              <div class="text-base font-medium text-gray-800">
+              <div class="text-base font-medium text-gray-800 dark:text-gray-200">
                 {{ $page.props.auth?.user?.nombre || $page.props.auth?.user?.name }}
               </div>
               <div class="text-sm font-medium text-gray-500">
@@ -148,15 +186,18 @@ const showingNavigationDropdown = ref(false)
             </div>
 
             <div class="mt-3 space-y-1">
+              <ResponsiveNavLink v-if="!esAdmin" :href="route('prestador.perfil.edit')" :active="route().current('prestador.perfil.edit')">
+                Mi Perfil de Prestador / Servicios
+              </ResponsiveNavLink>
               <ResponsiveNavLink :href="route('profile.edit')">
-                Profile
+                Ajustes de Cuenta
               </ResponsiveNavLink>
               <ResponsiveNavLink
                 :href="route('logout')"
                 method="post"
                 as="button"
               >
-                Log Out
+                Cerrar Sesión
               </ResponsiveNavLink>
             </div>
           </div>
@@ -164,7 +205,7 @@ const showingNavigationDropdown = ref(false)
       </nav>
 
       <!-- Page Heading -->
-      <header class="bg-white shadow" v-if="$slots.header">
+      <header class="bg-white dark:bg-gray-800 shadow" v-if="$slots.header">
         <div class="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
           <slot name="header" />
         </div>

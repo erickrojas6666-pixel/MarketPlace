@@ -14,69 +14,78 @@ use Inertia\Response;
 class ServicioController extends Controller
 {
     /**
-     * Catálogo público de servicios (para el cliente).
+     * Catálogo público de servicios.
      */
-    public function index(): Response
+    public function index(Request $request): Response
     {
-        $servicios = Servicio::with(['perfilPrestador.user', 'categoria'])
-            ->where('activo', true)
+        $categoriaId = $request->query('categoria_id');
+        $busqueda = $request->query('q');
+
+        $servicios = Servicio::with(['categoria', 'perfilPrestador.user'])
+            ->when($categoriaId, function ($query) use ($categoriaId) {
+                return $query->where('categoria_id', $categoriaId);
+            })
+            ->when($busqueda, function ($query) use ($busqueda) {
+                return $query->where('titulo', 'like', "%{$busqueda}%")
+                             ->orWhere('descripcion', 'like', "%{$busqueda}%");
+            })
             ->latest()
-            ->get();
+            ->paginate(12)
+            ->withQueryString();
+
+        $categorias = Categoria::orderBy('nombre', 'asc')->get();
 
         return Inertia::render('Servicios/Index', [
             'servicios'  => $servicios,
-            'categorias' => Categoria::all(),
+            'categorias' => $categorias,
+            'filtros'    => [
+                'categoria_id' => $categoriaId,
+                'q'            => $busqueda,
+            ],
         ]);
     }
 
     /**
-     * Guardar un nuevo servicio publicado por un prestador.
+     * Guarda un nuevo servicio asociándolo al perfil del prestador.
      */
     public function store(Request $request): RedirectResponse
     {
-        $user = Auth::user();
-
-        $perfil = PerfilPrestador::where('user_id', $user->id)->first();
-
-        if (!$perfil) {
-            return redirect()->back()->with('error', 'No se encontró un perfil de prestador.');
-        }
+        $perfil = PerfilPrestador::where('user_id', Auth::id())->firstOrFail();
 
         $validated = $request->validate([
-            'nombre'       => 'required|string|max:255',
-            'descripcion'  => 'required|string|max:1000',
-            'precio'       => 'nullable|numeric|min:0',
+            'titulo'       => 'required|string|max:255',
+            'descripcion'  => 'required|string',
             'categoria_id' => 'required|exists:categorias,id',
+            'precio'       => 'nullable|numeric|min:0',
         ]);
 
         Servicio::create([
             'perfil_prestador_id' => $perfil->id,
             'categoria_id'        => $validated['categoria_id'],
-            'titulo'              => $validated['nombre'],      // La BD usa 'titulo'
+            'titulo'              => $validated['titulo'],
             'descripcion'         => $validated['descripcion'],
-            'precio_base'         => $validated['precio'] ?? 0, // La BD usa 'precio_base'
+            'precio_base'         => $validated['precio'] ?? null,
             'activo'              => true,
         ]);
 
-        return redirect()->back()->with('success', '¡Servicio publicado con éxito!');
+        return redirect()->back()->with('success', 'Servicio publicado correctamente.');
     }
+
     /**
-     * Activar o desactivar la visibilidad de un servicio.
+     * Alterna el estado (activo/inactivo) del servicio.
      */
     public function toggleState(Servicio $servicio): RedirectResponse
     {
-        $user = Auth::user();
+        $perfil = PerfilPrestador::where('user_id', Auth::id())->first();
 
-        // Verificar propiedad del servicio
-        if ($servicio->perfilPrestador->user_id !== $user->id) {
-            abort(403, 'No tienes permiso para modificar este servicio.');
+        if (!$perfil || $servicio->perfil_prestador_id !== $perfil->id) {
+            abort(403, 'Acción no autorizada.');
         }
 
         $servicio->update([
             'activo' => !$servicio->activo,
         ]);
 
-        $estadoTexto = $servicio->activo ? 'activado' : 'desactivado';
-        return redirect()->back()->with('success', "Servicio {$estadoTexto} correctamente.");
+        return redirect()->back()->with('success', 'Estado del servicio actualizado.');
     }
 }
