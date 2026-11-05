@@ -1,5 +1,5 @@
 <script setup>
-import { ref } from 'vue'
+import { ref, computed } from 'vue'
 import { Head, useForm, router, Link } from '@inertiajs/vue3'
 import AuthenticatedLayout from '@/Layouts/AuthenticatedLayout.vue'
 
@@ -45,9 +45,35 @@ const guardarUsuario = () => {
 }
 
 const eliminarUsuario = (u) => {
-  if (confirm(`¿Estás seguro de eliminar al usuario "${u.name || u.email}"?`)) {
+  if (confirm(`¿Estás seguro de eliminar al usuario "${u.name || u.nombre || u.email}"?`)) {
     router.delete(route('admin.usuarios.destroy', u.id), { preserveScroll: true })
   }
+}
+
+/* ---------- Ayudas visuales ---------- */
+const total = computed(() => props.usuarios?.total || props.usuarios?.data?.length || 0)
+
+const nombreDe = (u) => u?.name || u?.nombre || 'Sin nombre'
+
+const iniciales = (texto) => {
+  const partes = String(texto || '?').trim().split(/\s+/)
+  return ((partes[0]?.[0] || '') + (partes[1]?.[0] || '')).toUpperCase() || '?'
+}
+
+const claseRol = (nombre) => {
+  const r = String(nombre || '').toLowerCase()
+  if (r === 'admin' || r === 'superadmin') return 'bg-principal text-white border-principal'
+  if (r === 'prestador') return 'bg-acento/20 text-principal border-acento/60'
+  if (r === 'cliente') return 'bg-niebla text-principal border-principal/15'
+  return 'bg-slate-100 text-grafito border-slate-300'
+}
+
+const iconos = {
+  usuarios: 'M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z',
+  volver: 'M11 17l-5-5m0 0l5-5m-5 5h12',
+  mas: 'M12 4v16m8-8H4',
+  editar: 'M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z',
+  basura: 'M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16',
 }
 </script>
 
@@ -55,99 +81,206 @@ const eliminarUsuario = (u) => {
   <Head title="Gestión de Usuarios y Roles" />
 
   <AuthenticatedLayout>
-    <div class="py-8 max-w-7xl mx-auto px-4 space-y-6">
-      <div class="flex justify-between items-center">
-        <div>
-          <h1 class="text-2xl font-bold dark:text-white">Gestión de Usuarios y Roles</h1>
-          <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">Crea y asigna roles administrativos a los miembros del equipo.</p>
+    <div class="py-10 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 space-y-8">
+
+      <!-- ============ BANNER ============ -->
+      <section class="relative overflow-hidden rounded-3xl bg-gradient-to-br from-principal via-principal to-[#1d4a8a] p-6 sm:p-8 shadow-xl shadow-principal/20">
+        <div class="absolute -top-16 -right-16 w-64 h-64 rounded-full bg-acento/20 blur-2xl"></div>
+        <div class="absolute -bottom-24 left-1/3 w-72 h-72 rounded-full bg-white/5"></div>
+
+        <div class="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-6">
+          <div class="flex items-center gap-4">
+            <div class="w-14 h-14 shrink-0 rounded-2xl bg-white/10 border border-white/15 text-acento flex items-center justify-center">
+              <svg class="w-7 h-7" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" :d="iconos.usuarios" />
+              </svg>
+            </div>
+            <div>
+              <h1 class="text-2xl sm:text-3xl font-extrabold text-white tracking-tight">Usuarios y Roles</h1>
+              <p class="text-sm text-niebla/80 mt-1">Crea cuentas y asigna roles a los miembros de la plataforma.</p>
+            </div>
+          </div>
+
+          <Link
+            :href="route('admin.dashboard')"
+            class="inline-flex items-center gap-2 self-start md:self-auto px-5 py-2.5 bg-white/10 hover:bg-white/20 text-white text-sm font-bold rounded-xl border border-white/20 transition-all duration-200 active:scale-95"
+          >
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" :d="iconos.volver" />
+            </svg>
+            Volver al Dashboard
+          </Link>
         </div>
-        <Link :href="route('admin.dashboard')" class="px-3 py-1.5 bg-gray-600 text-white text-xs font-bold rounded shadow">
-          ← Volver al Dashboard
-        </Link>
-      </div>
+      </section>
 
-      <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
-        <!-- FORMULARIO CREAR / EDITAR -->
-        <div class="bg-white dark:bg-gray-800 p-6 rounded-lg shadow space-y-4 md:col-span-1 h-fit">
-          <h2 class="font-semibold text-lg dark:text-white">
-            {{ usuarioEditando ? 'Editar Usuario' : 'Nuevo Usuario' }}
-          </h2>
+      <div class="grid grid-cols-1 lg:grid-cols-3 gap-8 items-start">
 
-          <form @submit.prevent="guardarUsuario" class="space-y-3">
+        <!-- ============ FORMULARIO CREAR / EDITAR ============ -->
+        <div
+          class="bg-white rounded-3xl p-6 border-2 shadow-md space-y-5 lg:col-span-1 lg:sticky lg:top-28 transition-colors duration-200"
+          :class="usuarioEditando ? 'border-acento/70' : 'border-slate-200/90'"
+        >
+          <div class="flex items-center gap-3">
+            <div
+              class="w-11 h-11 rounded-xl flex items-center justify-center"
+              :class="usuarioEditando ? 'bg-acento text-principal' : 'bg-niebla text-principal'"
+            >
+              <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" :d="usuarioEditando ? iconos.editar : iconos.mas" />
+              </svg>
+            </div>
             <div>
-              <label class="block text-xs font-bold dark:text-gray-200 mb-1">Nombre</label>
-              <input v-model="form.name" type="text" required class="w-full text-sm rounded border-gray-300 dark:bg-gray-700 dark:text-white" />
-              <span v-if="form.errors.name" class="text-xs text-red-500">{{ form.errors.name }}</span>
+              <h2 class="font-extrabold text-lg text-principal tracking-tight">
+                {{ usuarioEditando ? 'Editar usuario' : 'Nuevo usuario' }}
+              </h2>
+              <p class="text-xs text-gris-medio">
+                {{ usuarioEditando ? 'Modificando a ' + nombreDe(usuarioEditando) : 'Completa los datos de la cuenta' }}
+              </p>
+            </div>
+          </div>
+
+          <form @submit.prevent="guardarUsuario" class="space-y-4">
+            <div>
+              <label class="block text-principal font-bold text-xs uppercase tracking-wider mb-1.5">Nombre</label>
+              <input
+                v-model="form.name"
+                type="text"
+                required
+                placeholder="Ej. Juan Pérez"
+                class="block w-full rounded-xl border-slate-300 focus:border-principal focus:ring-principal text-sm shadow-sm py-2 px-3 placeholder:text-slate-400"
+              />
+              <span v-if="form.errors.name" class="block mt-1 text-xs font-semibold text-red-600">{{ form.errors.name }}</span>
             </div>
 
             <div>
-              <label class="block text-xs font-bold dark:text-gray-200 mb-1">Correo Electrónico</label>
-              <input v-model="form.email" type="email" required class="w-full text-sm rounded border-gray-300 dark:bg-gray-700 dark:text-white" />
-              <span v-if="form.errors.email" class="text-xs text-red-500">{{ form.errors.email }}</span>
+              <label class="block text-principal font-bold text-xs uppercase tracking-wider mb-1.5">Correo electrónico</label>
+              <input
+                v-model="form.email"
+                type="email"
+                required
+                placeholder="ejemplo@correo.com"
+                class="block w-full rounded-xl border-slate-300 focus:border-principal focus:ring-principal text-sm shadow-sm py-2 px-3 placeholder:text-slate-400"
+              />
+              <span v-if="form.errors.email" class="block mt-1 text-xs font-semibold text-red-600">{{ form.errors.email }}</span>
             </div>
 
             <div>
-              <label class="block text-xs font-bold dark:text-gray-200 mb-1">
+              <label class="block text-principal font-bold text-xs uppercase tracking-wider mb-1.5">
                 {{ usuarioEditando ? 'Contraseña (opcional)' : 'Contraseña' }}
               </label>
-              <input v-model="form.password" type="password" :required="!usuarioEditando" class="w-full text-sm rounded border-gray-300 dark:bg-gray-700 dark:text-white" />
-              <span v-if="form.errors.password" class="text-xs text-red-500">{{ form.errors.password }}</span>
+              <input
+                v-model="form.password"
+                type="password"
+                :required="!usuarioEditando"
+                :placeholder="usuarioEditando ? 'Déjala vacía para no cambiarla' : 'Mínimo 8 caracteres'"
+                class="block w-full rounded-xl border-slate-300 focus:border-principal focus:ring-principal text-sm shadow-sm py-2 px-3 placeholder:text-slate-400"
+              />
+              <span v-if="form.errors.password" class="block mt-1 text-xs font-semibold text-red-600">{{ form.errors.password }}</span>
             </div>
 
             <div>
-              <label class="block text-xs font-bold dark:text-gray-200 mb-1">Rol Asignado</label>
-              <select v-model="form.role" required class="w-full text-sm rounded border-gray-300 dark:bg-gray-700 dark:text-white capitalize">
+              <label class="block text-principal font-bold text-xs uppercase tracking-wider mb-1.5">Rol asignado</label>
+              <select
+                v-model="form.role"
+                required
+                class="block w-full rounded-xl border-slate-300 focus:border-principal focus:ring-principal text-sm shadow-sm py-2 px-3 capitalize"
+              >
                 <option v-for="r in roles" :key="r" :value="r">{{ r }}</option>
               </select>
-              <span v-if="form.errors.role" class="text-xs text-red-500">{{ form.errors.role }}</span>
+              <span v-if="form.errors.role" class="block mt-1 text-xs font-semibold text-red-600">{{ form.errors.role }}</span>
             </div>
 
-            <div class="flex gap-2 pt-2">
-              <button type="submit" :disabled="form.processing" class="flex-1 py-2 bg-indigo-600 text-white text-xs font-bold rounded shadow">
-                {{ usuarioEditando ? 'Actualizar' : 'Guardar Usuario' }}
+            <div class="flex gap-3 pt-2">
+              <button
+                type="submit"
+                :disabled="form.processing"
+                class="flex-1 py-2.5 px-4 bg-principal text-white text-sm font-bold rounded-xl shadow-md hover:bg-slate-800 transition-all duration-200 active:scale-95"
+                :class="{ 'opacity-50 cursor-not-allowed': form.processing }"
+              >
+                {{ usuarioEditando ? 'Actualizar' : 'Guardar usuario' }}
               </button>
-              <button v-if="usuarioEditando" type="button" @click="cancelarEdicion" class="px-3 py-2 bg-gray-200 text-gray-700 text-xs font-bold rounded">
+              <button
+                v-if="usuarioEditando"
+                type="button"
+                @click="cancelarEdicion"
+                class="px-4 py-2.5 bg-white hover:bg-slate-50 text-grafito text-sm font-bold rounded-xl border-2 border-slate-200 transition active:scale-95"
+              >
                 Cancelar
               </button>
             </div>
           </form>
         </div>
 
-        <!-- LISTADO DE USUARIOS -->
-        <div class="bg-white dark:bg-gray-800 p-6 rounded-lg shadow space-y-4 md:col-span-2">
-          <h2 class="font-semibold text-lg dark:text-white">Usuarios Registrados ({{ usuarios.total || usuarios.data.length }})</h2>
+        <!-- ============ LISTADO DE USUARIOS ============ -->
+        <div class="bg-white rounded-3xl border-2 border-slate-200/90 shadow-md overflow-hidden lg:col-span-2">
+          <div class="p-6 flex items-center justify-between">
+            <div>
+              <h2 class="font-extrabold text-lg text-principal tracking-tight">Usuarios registrados</h2>
+              <p class="text-xs text-gris-medio mt-0.5">Cuentas activas en la plataforma</p>
+            </div>
+            <span class="min-w-8 h-8 px-3 rounded-full bg-niebla text-principal text-sm font-extrabold flex items-center justify-center border border-principal/15">
+              {{ total }}
+            </span>
+          </div>
 
           <div class="overflow-x-auto">
-            <table class="w-full text-left text-sm text-gray-600 dark:text-gray-300">
-              <thead class="bg-gray-100 dark:bg-gray-700 text-xs uppercase font-bold text-gray-700 dark:text-gray-200">
+            <table class="w-full text-left text-sm text-grafito">
+              <thead class="bg-niebla/60 text-xs uppercase tracking-wider font-bold text-principal">
                 <tr>
-                  <th class="p-3">Usuario</th>
-                  <th class="p-3">Rol</th>
-                  <th class="p-3 text-right">Acciones</th>
+                  <th class="px-6 py-3">Usuario</th>
+                  <th class="px-6 py-3">Rol</th>
+                  <th class="px-6 py-3 text-right">Acciones</th>
                 </tr>
               </thead>
-              <tbody class="divide-y dark:divide-gray-700">
-                <tr v-for="u in usuarios.data" :key="u.id" class="hover:bg-gray-50 dark:hover:bg-gray-750">
-                  <td class="p-3">
-                    <p class="font-bold text-gray-900 dark:text-white">{{ u.name || u.nombre }}</p>
-                    <p class="text-xs text-gray-500">{{ u.email }}</p>
+              <tbody class="divide-y divide-slate-100">
+                <tr v-for="u in usuarios.data" :key="u.id" class="hover:bg-niebla/30 transition-colors duration-150">
+                  <td class="px-6 py-4">
+                    <div class="flex items-center gap-3">
+                      <div class="w-10 h-10 shrink-0 rounded-xl bg-gradient-to-br from-principal to-[#1d4a8a] text-white font-extrabold text-xs flex items-center justify-center shadow-sm">
+                        {{ iniciales(nombreDe(u)) }}
+                      </div>
+                      <div class="min-w-0">
+                        <p class="font-bold text-principal truncate">{{ nombreDe(u) }}</p>
+                        <p class="text-xs text-gris-medio truncate">{{ u.email }}</p>
+                      </div>
+                    </div>
                   </td>
-                  <td class="p-3">
-                    <span 
-                      v-for="r in u.roles" 
-                      :key="r.id"
-                      class="px-2 py-0.5 rounded text-xs font-bold uppercase bg-indigo-100 text-indigo-800 dark:bg-indigo-900 dark:text-indigo-300"
-                    >
-                      {{ r.name }}
-                    </span>
+
+                  <td class="px-6 py-4">
+                    <div class="flex flex-wrap gap-1.5">
+                      <span
+                        v-for="r in u.roles"
+                        :key="r.id"
+                        class="px-2.5 py-1 rounded-full text-[11px] font-bold uppercase tracking-wider border"
+                        :class="claseRol(r.name)"
+                      >
+                        {{ r.name }}
+                      </span>
+                      <span v-if="!u.roles || !u.roles.length" class="text-xs text-gris-medio">Sin rol</span>
+                    </div>
                   </td>
-                  <td class="p-3 text-right space-x-2">
-                    <button @click="abrirEdicion(u)" class="px-2.5 py-1 bg-yellow-500 text-white text-xs font-bold rounded">
-                      Editar
-                    </button>
-                    <button @click="eliminarUsuario(u)" class="px-2.5 py-1 bg-red-600 text-white text-xs font-bold rounded">
-                      Eliminar
-                    </button>
+
+                  <td class="px-6 py-4">
+                    <div class="flex justify-end gap-2">
+                      <button
+                        @click="abrirEdicion(u)"
+                        class="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white hover:bg-niebla text-principal text-xs font-bold rounded-xl border-2 border-slate-200 hover:border-principal/40 transition active:scale-95"
+                      >
+                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                          <path stroke-linecap="round" stroke-linejoin="round" :d="iconos.editar" />
+                        </svg>
+                        Editar
+                      </button>
+                      <button
+                        @click="eliminarUsuario(u)"
+                        class="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white hover:bg-red-50 text-red-600 text-xs font-bold rounded-xl border-2 border-red-200 hover:border-red-300 transition active:scale-95"
+                      >
+                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                          <path stroke-linecap="round" stroke-linejoin="round" :d="iconos.basura" />
+                        </svg>
+                        Eliminar
+                      </button>
+                    </div>
                   </td>
                 </tr>
               </tbody>
