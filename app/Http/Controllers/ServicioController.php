@@ -7,7 +7,6 @@ use App\Models\PerfilPrestador;
 use App\Models\Servicio;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Auth;
 use Inertia\Inertia;
 use Inertia\Response;
 
@@ -18,26 +17,40 @@ class ServicioController extends Controller
      */
     public function index(Request $request): Response
     {
-        $categoriaId = $request->query('categoria_id');
-        $busqueda = $request->query('q');
+        $filtros = $request->validate([
+            'categoria_id' => 'nullable|integer',
+            'q'            => 'nullable|string|max:100',
+        ]);
 
-        $servicios = Servicio::with(['categoria', 'perfilPrestador.user'])
-            ->when($categoriaId, function ($query) use ($categoriaId) {
-                return $query->where('categoria_id', $categoriaId);
-            })
-            ->when($busqueda, function ($query) use ($busqueda) {
-                return $query->where('titulo', 'like', "%{$busqueda}%")
-                             ->orWhere('descripcion', 'like', "%{$busqueda}%");
-            })
+        $categoriaId = $filtros['categoria_id'] ?? null;
+        $busqueda    = $filtros['q'] ?? null;
+
+        // Catálogo público: solo servicios activos de prestadores verificados.
+        // Del prestador solo viajan id y nombre (nunca correo ni otros datos).
+        $servicios = Servicio::query()
+            ->with([
+                'categoria:id,nombre',
+                'perfilPrestador:id,user_id',
+                'perfilPrestador.user:id,nombre',
+            ])
+            ->activos()
+            ->whereHas(
+                'perfilPrestador',
+                fn ($q) => $q->where('estado_verificacion', PerfilPrestador::ESTADO_VERIFICADO)
+            )
+            ->when($categoriaId, fn ($q) => $q->where('categoria_id', $categoriaId))
+            // El grupo evita que el orWhere anule el filtro de categoría y de activos.
+            ->when($busqueda, fn ($q) => $q->where(function ($w) use ($busqueda) {
+                $w->where('titulo', 'like', "%{$busqueda}%")
+                  ->orWhere('descripcion', 'like', "%{$busqueda}%");
+            }))
             ->latest()
             ->paginate(12)
             ->withQueryString();
 
-        $categorias = Categoria::orderBy('nombre', 'asc')->get();
-
         return Inertia::render('Servicios/Index', [
             'servicios'  => $servicios,
-            'categorias' => $categorias,
+            'categorias' => Categoria::orderBy('nombre')->get(['id', 'nombre', 'descripcion']),
             'filtros'    => [
                 'categoria_id' => $categoriaId,
                 'q'            => $busqueda,
@@ -50,7 +63,14 @@ class ServicioController extends Controller
      */
     public function store(Request $request): RedirectResponse
     {
-        $perfil = PerfilPrestador::where('user_id', Auth::id())->firstOrFail();
+        $user = $request->user();
+
+        // Solo prestadores con perfil verificado pueden publicar (RF-08).
+        if (! $user->esPrestadorVerificado()) {
+            return redirect()->back()->with('error', 'Tu perfil debe estar verificado para publicar servicios.');
+        }
+
+        $perfil = $user->perfilPrestador;
 
         $validated = $request->validate([
             'titulo'       => 'required|string|max:255',
@@ -74,13 +94,15 @@ class ServicioController extends Controller
     /**
      * Alterna el estado (activo/inactivo) del servicio.
      */
-    public function toggleState(Servicio $servicio): RedirectResponse
+    public function toggleState(Request $request, Servicio $servicio): RedirectResponse
     {
-        $perfil = PerfilPrestador::where('user_id', Auth::id())->first();
+        $perfil = $request->user()->perfilPrestador;
 
-        if (!$perfil || $servicio->perfil_prestador_id !== $perfil->id) {
-            abort(403, 'Acción no autorizada.');
-        }
+        abort_unless(
+            $perfil && (int) $servicio->perfil_prestador_id === (int) $perfil->id,
+            403,
+            'Acción no autorizada.'
+        );
 
         $servicio->update([
             'activo' => !$servicio->activo,

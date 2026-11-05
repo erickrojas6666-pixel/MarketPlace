@@ -3,9 +3,11 @@
 namespace App\Http\Controllers\Admin;
 
 use App\Http\Controllers\Controller;
+use App\Models\PerfilPrestador;
 use App\Models\User;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Validation\Rules;
 use Inertia\Inertia;
@@ -39,19 +41,22 @@ class UsuarioAdminController extends Controller
     public function store(Request $request): RedirectResponse
     {
         $request->validate([
-            'name'     => 'required|string|max:255',
+            'nombre'   => 'required|string|max:255',
             'email'    => 'required|string|email|max:255|unique:users,email',
             'password' => ['required', Rules\Password::defaults()],
             'role'     => 'required|string|exists:roles,name',
         ]);
 
-        $user = User::create([
-            'name'     => $request->name,
-            'email'    => $request->email,
-            'password' => Hash::make($request->password),
-        ]);
+        DB::transaction(function () use ($request) {
+            $user = User::create([
+                'nombre'   => $request->nombre,
+                'email'    => $request->email,
+                'password' => Hash::make($request->password),
+            ]);
 
-        $user->assignRole($request->role);
+            $user->assignRole($request->role);
+            $this->asegurarPerfilSiEsPrestador($user, $request->role);
+        });
 
         return redirect()->back()->with('success', 'Usuario administrativo creado exitosamente.');
     }
@@ -62,14 +67,14 @@ class UsuarioAdminController extends Controller
     public function update(Request $request, User $usuario): RedirectResponse
     {
         $request->validate([
-            'name'  => 'required|string|max:255',
+            'nombre' => 'required|string|max:255',
             'email' => 'required|string|email|max:255|unique:users,email,' . $usuario->id,
             'role'  => 'required|string|exists:roles,name',
         ]);
 
         $usuario->update([
-            'name'  => $request->name,
-            'email' => $request->email,
+            'nombre' => $request->nombre,
+            'email'  => $request->email,
         ]);
 
         if ($request->filled('password')) {
@@ -83,6 +88,7 @@ class UsuarioAdminController extends Controller
 
         // Sincronizar nuevo rol con Spatie
         $usuario->syncRoles([$request->role]);
+        $this->asegurarPerfilSiEsPrestador($usuario, $request->role);
 
         return redirect()->back()->with('success', 'Usuario y permisos actualizados.');
     }
@@ -99,5 +105,19 @@ class UsuarioAdminController extends Controller
         $usuario->delete();
 
         return redirect()->back()->with('success', 'Usuario eliminado correctamente.');
+    }
+
+    /**
+     * Un prestador sin perfil no puede operar (el dashboard lo trataría como cliente).
+     * Aquí el perfil se crea por una acción explícita del admin, nunca por navegar.
+     */
+    private function asegurarPerfilSiEsPrestador(User $user, string $rol): void
+    {
+        if ($rol === 'prestador') {
+            PerfilPrestador::firstOrCreate(
+                ['user_id' => $user->id],
+                ['estado_verificacion' => PerfilPrestador::ESTADO_PENDIENTE]
+            );
+        }
     }
 }

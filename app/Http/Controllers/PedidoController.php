@@ -8,9 +8,26 @@ use App\Notifications\EstadoPedidoActualizado;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\Rule;
 
 class PedidoController extends Controller
 {
+    /**
+     * Máquina de estados: estado actual => estados a los que se puede pasar.
+     * Los estados finales (rechazado, completado, cancelado) no tienen salida.
+     */
+    private const TRANSICIONES_PRESTADOR = [
+        Pedido::PENDIENTE   => [Pedido::ACEPTADO, Pedido::RECHAZADO],
+        Pedido::ACEPTADO    => [Pedido::EN_PROGRESO, Pedido::CANCELADO],
+        Pedido::EN_PROGRESO => [Pedido::COMPLETADO, Pedido::CANCELADO],
+    ];
+
+    /** El cliente solo puede cancelar mientras el prestador no ha respondido. */
+    private const TRANSICIONES_CLIENTE = [
+        Pedido::PENDIENTE => [Pedido::CANCELADO],
+    ];
+
     /**
      * El cliente solicita un servicio.
      */
@@ -44,55 +61,58 @@ class PedidoController extends Controller
     }
 
     /**
-     * Actualiza el estado del pedido con mapeo defensivo para MySQL ENUM y dispara notificaciones.
+     * Cambia el estado de un pedido respetando quién es el actor y el flujo permitido.
      */
     public function updateEstado(Request $request, Pedido $pedido): RedirectResponse
     {
         $user = Auth::user();
 
         $request->validate([
-            'estado' => 'required|string',
+            'estado' => ['required', 'string', Rule::in(Pedido::ESTADOS)],
         ]);
 
-        // Mapeo defensivo para ENUM: convierte 'en_proceso' a 'en_progreso'
-        $estadoInput = $request->estado;
-        $nuevoEstado = ($estadoInput === 'en_proceso') ? 'en_progreso' : $estadoInput;
+        $nuevoEstado = $request->estado;
 
-        if (!in_array($nuevoEstado, ['pendiente', 'aceptado', 'rechazado', 'en_progreso', 'completado', 'cancelado'])) {
-            return redirect()->back()->with('error', 'Estado no válido.');
+        $pedido->load(['servicio.perfilPrestador.user', 'cliente']);
+
+        // Quién es quién: el prestador debe existir y coincidir (sin prestador, nadie lo es).
+        $prestadorUser = $pedido->servicio?->perfilPrestador?->user;
+        $esPrestador   = $prestadorUser !== null && $prestadorUser->id === $user->id;
+        $esCliente     = $pedido->cliente_id === $user->id;
+
+        if (! $esPrestador && ! $esCliente) {
+            abort(403, 'No tienes permiso para gestionar este pedido.');
         }
 
-        $pedido->load(['servicio.perfilPrestador.user', 'cliente', 'user']);
+        // La verificación del estado actual y el cambio van juntos y con el registro
+        // bloqueado: dos clics simultáneos no pueden saltarse el flujo.
+        $error = DB::transaction(function () use ($pedido, $nuevoEstado, $esPrestador, $esCliente) {
+            $estadoActual = Pedido::whereKey($pedido->id)->lockForUpdate()->value('estado');
 
-        // Validaciones de permisos / seguridad
-        if ($nuevoEstado === 'cancelado') {
-            $esCliente = $pedido->cliente_id === $user->id;
-            $esPrestador = optional(optional($pedido->servicio)->perfilPrestador)->user_id === $user->id;
-
-            if (!$esCliente && !$esPrestador) {
-                abort(403, 'No tienes permiso para cancelar este pedido.');
+            $permitidos = [];
+            if ($esPrestador) {
+                $permitidos = array_merge($permitidos, self::TRANSICIONES_PRESTADOR[$estadoActual] ?? []);
             }
-        } else {
-            $prestadorUserId = optional(optional($pedido->servicio)->perfilPrestador)->user_id;
-            
-            if ($prestadorUserId && $prestadorUserId !== $user->id) {
-                abort(403, 'No tienes permiso para gestionar este pedido.');
+            if ($esCliente) {
+                $permitidos = array_merge($permitidos, self::TRANSICIONES_CLIENTE[$estadoActual] ?? []);
             }
+
+            if (! in_array($nuevoEstado, $permitidos, true)) {
+                return "No puedes cambiar un pedido '{$estadoActual}' a '{$nuevoEstado}'.";
+            }
+
+            $pedido->update(['estado' => $nuevoEstado]);
+
+            return null;
+        });
+
+        if ($error !== null) {
+            return redirect()->back()->with('error', $error);
         }
 
-        $pedido->update([
-            'estado' => $nuevoEstado,
-        ]);
-
-        // Notificaciones según quién actualizó el pedido
-        $clienteUser = $pedido->cliente ?? $pedido->user;
-        $prestadorUser = optional(optional($pedido->servicio)->perfilPrestador)->user;
-
-        if ($clienteUser && $user->id === $clienteUser->id && $prestadorUser) {
-            $prestadorUser->notify(new EstadoPedidoActualizado($pedido, $nuevoEstado));
-        } elseif ($clienteUser) {
-            $clienteUser->notify(new EstadoPedidoActualizado($pedido, $nuevoEstado));
-        }
+        // Se avisa a la otra parte: si actuó el cliente, al prestador; si no, al cliente.
+        $destinatario = $esCliente ? $prestadorUser : $pedido->cliente;
+        $destinatario?->notify(new EstadoPedidoActualizado($pedido, $nuevoEstado));
 
         return redirect()->back()->with('success', "El pedido #{$pedido->id} ahora está '{$nuevoEstado}'.");
     }
