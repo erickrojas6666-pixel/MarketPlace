@@ -15,6 +15,13 @@ export default {
             fontFamily: {
                 sans: ['Figtree', ...defaultTheme.fontFamily.sans],
             },
+            colors: {
+                principal: '#14305D',      // Azul marino
+                acento: '#EDB10C',         // Dorado
+                grafito: '#5B5B5B',        // Texto principal
+                'gris-medio': '#757676',   // Texto secundario
+                niebla: '#D8E4F2',         // Azul niebla con más contraste real
+            },
         },
     },
 

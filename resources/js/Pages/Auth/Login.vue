@@ -31,69 +31,77 @@ const submit = () => {
 
 <template>
     <GuestLayout>
-        <Head title="Log in" />
+        <Head title="Iniciar sesión - OficiosYa" />
 
-        <div v-if="status" class="mb-4 text-sm font-medium text-green-600">
+        <div class="mb-6 text-center">
+            <h2 class="text-2xl font-extrabold text-principal tracking-tight">Bienvenido de nuevo</h2>
+            <p class="text-xs text-gris-medio mt-1">Ingresa a tu cuenta para gestionar tus solicitudes</p>
+        </div>
+
+        <div v-if="status" class="mb-4 text-sm font-medium text-green-600 bg-green-50 p-3 rounded-xl border border-green-200">
             {{ status }}
         </div>
 
-        <form @submit.prevent="submit">
+        <form @submit.prevent="submit" class="space-y-4">
             <div>
-                <InputLabel for="email" value="Email" />
-
+                <InputLabel for="email" value="Correo electrónico" class="text-principal font-bold text-xs uppercase tracking-wider" />
                 <TextInput
                     id="email"
                     type="email"
-                    class="mt-1 block w-full"
+                    class="mt-1.5 block w-full rounded-xl border-slate-300 focus:border-principal focus:ring-principal text-sm shadow-sm"
                     v-model="form.email"
                     required
                     autofocus
                     autocomplete="username"
+                    placeholder="ejemplo@correo.com"
                 />
-
-                <InputError class="mt-2" :message="form.errors.email" />
+                <InputError class="mt-2 text-xs" :message="form.errors.email" />
             </div>
 
-            <div class="mt-4">
-                <InputLabel for="password" value="Password" />
-
+            <div>
+                <InputLabel for="password" value="Contraseña" class="text-principal font-bold text-xs uppercase tracking-wider" />
                 <TextInput
                     id="password"
                     type="password"
-                    class="mt-1 block w-full"
+                    class="mt-1.5 block w-full rounded-xl border-slate-300 focus:border-principal focus:ring-principal text-sm shadow-sm"
                     v-model="form.password"
                     required
                     autocomplete="current-password"
+                    placeholder="••••••••"
                 />
-
-                <InputError class="mt-2" :message="form.errors.password" />
+                <InputError class="mt-2 text-xs" :message="form.errors.password" />
             </div>
 
-            <div class="mt-4 block">
-                <label class="flex items-center">
-                    <Checkbox name="remember" v-model:checked="form.remember" />
-                    <span class="ms-2 text-sm text-gray-600"
-                        >Remember me</span
-                    >
+            <div class="flex items-center justify-between pt-1">
+                <label class="flex items-center cursor-pointer">
+                    <Checkbox name="remember" v-model:checked="form.remember" class="rounded border-slate-300 text-principal focus:ring-principal" />
+                    <span class="ms-2 text-xs text-gris-medio font-medium">Recordarme</span>
                 </label>
-            </div>
 
-            <div class="mt-4 flex items-center justify-end">
                 <Link
                     v-if="canResetPassword"
                     :href="route('password.request')"
-                    class="rounded-md text-sm text-gray-600 underline hover:text-gray-900 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2"
+                    class="text-xs text-principal hover:text-acento font-semibold transition-colors"
                 >
-                    Forgot your password?
+                    ¿Olvidaste tu contraseña?
                 </Link>
+            </div>
 
-                <PrimaryButton
-                    class="ms-4"
-                    :class="{ 'opacity-25': form.processing }"
+            <div class="pt-2">
+                <button
+                    class="w-full py-3 px-4 bg-principal text-white font-bold rounded-xl shadow-md hover:bg-slate-800 transition-all duration-200 active:scale-95 text-sm flex justify-center items-center gap-2"
+                    :class="{ 'opacity-50 cursor-not-allowed': form.processing }"
                     :disabled="form.processing"
                 >
-                    Log in
-                </PrimaryButton>
+                    <span>Iniciar sesión</span>
+                </button>
+            </div>
+
+            <div class="mt-6 pt-4 border-t border-slate-100 text-center text-xs text-gris-medio">
+                ¿No tienes cuenta?
+                <Link :href="route('register')" class="font-bold text-principal hover:text-acento ms-1 transition-colors">
+                    Regístrate aquí
+                </Link>
             </div>
         </form>
     </GuestLayout>
