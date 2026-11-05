@@ -50,7 +50,14 @@ class PerfilPrestadorController extends Controller
         $validated = $request->validate([
             'descripcion'          => 'required|string|max:1000',
             'ubicacion_aproximada' => 'nullable|string|max:255',
+            'latitud'              => 'nullable|required_with:longitud|numeric|between:-90,90',
+            'longitud'             => 'nullable|required_with:latitud|numeric|between:-180,180',
+            'radio_cobertura_km'   => 'nullable|integer|between:1,100',
         ]);
+
+        // ~110 m de precisión: sirve para filtrar por cercanía sin revelar el domicilio exacto.
+        $latitud  = isset($validated['latitud']) ? round((float) $validated['latitud'], 3) : null;
+        $longitud = isset($validated['longitud']) ? round((float) $validated['longitud'], 3) : null;
 
         $perfil = PerfilPrestador::firstOrCreate(
             ['user_id' => Auth::id()],
@@ -59,7 +66,10 @@ class PerfilPrestadorController extends Controller
 
         $perfil->update([
             'descripcion'          => $validated['descripcion'],
-            'ubicacion_aproximada' => $validated['ubicacion_aproximada'],
+            'ubicacion_aproximada' => $validated['ubicacion_aproximada'] ?? null,
+            'latitud'              => $latitud,
+            'longitud'             => $longitud,
+            'radio_cobertura_km'   => $validated['radio_cobertura_km'] ?? 10,
         ]);
 
         return redirect()->back()->with('success', 'Perfil actualizado correctamente.');

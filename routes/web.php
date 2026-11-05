@@ -68,23 +68,25 @@ Route::middleware('auth')->group(function () {
     Route::delete('/profile', [ProfileController::class, 'destroy'])->name('profile.destroy');
 
     // API de Geocodificación (Proxy Nominatim)
-    Route::get('/api/buscar-ubicacion', [UbicacionController::class, 'buscarUbicacion'])->name('api.ubicacion');
+    Route::get('/api/buscar-ubicacion', [UbicacionController::class, 'buscarUbicacion'])
+        ->middleware('throttle:20,1')
+        ->name('api.ubicacion');
 
     // Gestión de Pedidos y Estado
-    Route::get('/pedidos', [PedidoController::class, 'index'])->name('pedidos.index');
     Route::post('/pedidos', [PedidoController::class, 'store'])->name('pedidos.store');
     Route::patch('/pedidos/{pedido}/estado', [PedidoController::class, 'updateEstado'])->name('pedidos.updateEstado');
-
-    // Publicación y Toggle de Servicios (Prestadores)
-    Route::post('/servicios', [ServicioController::class, 'store'])->name('servicios.store');
-    Route::patch('/servicios/{servicio}/toggle', [ServicioController::class, 'toggleState'])->name('servicios.toggle');
 
     // Reseñas y Calificaciones (Clientes)
     Route::post('/resenas', [ResenaController::class, 'store'])->name('resenas.store');
 
-    // Perfil Profesional y Servicios de Prestador
-    Route::get('/prestador/perfil', [PerfilPrestadorController::class, 'edit'])->name('prestador.perfil.edit');
-    Route::post('/prestador/perfil', [PerfilPrestadorController::class, 'update'])->name('prestador.perfil.update');
+    // Solo usuarios con rol prestador: perfil profesional y publicación de servicios.
+    Route::middleware('role:prestador')->group(function () {
+        Route::get('/prestador/perfil', [PerfilPrestadorController::class, 'edit'])->name('prestador.perfil.edit');
+        Route::post('/prestador/perfil', [PerfilPrestadorController::class, 'update'])->name('prestador.perfil.update');
+
+        Route::post('/servicios', [ServicioController::class, 'store'])->name('servicios.store');
+        Route::patch('/servicios/{servicio}/toggle', [ServicioController::class, 'toggleState'])->name('servicios.toggle');
+    });
 });
 
 // --------------------------------------------------------------------------

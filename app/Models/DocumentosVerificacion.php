@@ -1,60 +1,63 @@
 <?php
 
-/**
- * Created by Reliese Model.
- */
-
 namespace App\Models;
 
-use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 /**
- * Class DocumentosVerificacion
- * 
  * @property int $id
  * @property int $perfil_id
- * @property string $tipo
+ * @property string $tipo    ine_frente | ine_reverso | comprobante_domicilio | referencia_personal | antecedentes
  * @property string $ruta_cifrada
  * @property string $hash_sha256
- * @property string $estado
+ * @property string $estado  pendiente | valido | rechazado
  * @property int|null $revisado_por
- * @property Carbon|null $vence_en
- * @property Carbon|null $created_at
- * @property Carbon|null $updated_at
- * 
- * @property PerfilesPrestador $perfiles_prestador
- * @property User|null $user
- *
- * @package App\Models
+ * @property \Carbon\Carbon|null $vence_en
  */
 class DocumentosVerificacion extends Model
 {
-	protected $table = 'documentos_verificacion';
+    public const TIPOS = [
+        'ine_frente',
+        'ine_reverso',
+        'comprobante_domicilio',
+        'referencia_personal',
+        'antecedentes',
+    ];
 
-	protected $casts = [
-		'perfil_id' => 'int',
-		'revisado_por' => 'int',
-		'vence_en' => 'datetime'
-	];
+    public const ESTADOS = ['pendiente', 'valido', 'rechazado'];
 
-	protected $fillable = [
-		'perfil_id',
-		'tipo',
-		'ruta_cifrada',
-		'hash_sha256',
-		'estado',
-		'revisado_por',
-		'vence_en'
-	];
+    protected $table = 'documentos_verificacion';
 
-	public function perfiles_prestador()
-	{
-		return $this->belongsTo(PerfilesPrestador::class, 'perfil_id');
-	}
+    protected $fillable = [
+        'perfil_id',
+        'tipo',
+        'ruta_cifrada',
+        'hash_sha256',
+        'estado',
+        'revisado_por',
+        'vence_en',
+    ];
 
-	public function user()
-	{
-		return $this->belongsTo(User::class, 'revisado_por');
-	}
+    protected $casts = [
+        'perfil_id'    => 'integer',
+        'revisado_por' => 'integer',
+        'vence_en'     => 'date',
+    ];
+
+    /** La ruta nunca debe viajar al frontend. */
+    protected $hidden = [
+        'ruta_cifrada',
+        'hash_sha256',
+    ];
+
+    public function perfil(): BelongsTo
+    {
+        return $this->belongsTo(PerfilPrestador::class, 'perfil_id');
+    }
+
+    public function revisor(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'revisado_por');
+    }
 }

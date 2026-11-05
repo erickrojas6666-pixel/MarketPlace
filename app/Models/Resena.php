@@ -1,66 +1,51 @@
 <?php
 
-/**
- * Created by Reliese Model.
- */
-
 namespace App\Models;
 
-use Carbon\Carbon;
-use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 /**
- * Class Resena
- * 
+ * Reseña del cliente sobre un pedido completado (MVP).
+ *
  * @property int $id
  * @property int $pedido_id
- * @property int $autor_id
- * @property int $destinatario_id
- * @property string $tipo
- * @property int $puntuacion
+ * @property int $cliente_id
+ * @property int $servicio_id
+ * @property int $calificacion
  * @property string|null $comentario
- * @property Carbon|null $publicada_en
- * @property Carbon|null $created_at
- * 
- * @property User $user
- * @property Pedido $pedido
- *
- * @package App\Models
  */
 class Resena extends Model
 {
-	protected $table = 'resenas';
-	public $timestamps = false;
+    protected $table = 'resenas';
 
-	protected $casts = [
-		'pedido_id' => 'int',
-		'autor_id' => 'int',
-		'destinatario_id' => 'int',
-		'puntuacion' => 'int',
-		'publicada_en' => 'datetime'
-	];
+    protected $fillable = [
+        'pedido_id',
+        'cliente_id',
+        'servicio_id',
+        'calificacion',
+        'comentario',
+    ];
 
-	protected $fillable = [
-    'pedido_id',
-    'cliente_id',
-    'prestador_id',
-    'servicio_id',
-    'calificacion',
-    'comentario',
-];
-	public function user()
-	{
-		return $this->belongsTo(User::class, 'destinatario_id');
-	}
+    protected $casts = [
+        'pedido_id'    => 'integer',
+        'cliente_id'   => 'integer',
+        'servicio_id'  => 'integer',
+        'calificacion' => 'integer',
+    ];
 
-	public function pedido()
-	{
-		return $this->belongsTo(Pedido::class);
-	}
+    public function pedido(): BelongsTo
+    {
+        return $this->belongsTo(Pedido::class);
+    }
 
-    public function cliente()
+    public function cliente(): BelongsTo
     {
         return $this->belongsTo(User::class, 'cliente_id');
+    }
+
+    public function servicio(): BelongsTo
+    {
+        return $this->belongsTo(Servicio::class);
     }
 }
