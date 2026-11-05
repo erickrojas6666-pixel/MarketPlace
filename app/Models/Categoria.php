@@ -4,8 +4,15 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Support\Str;
 
+/**
+ * @property int $id
+ * @property string $nombre
+ * @property string $slug
+ * @property string|null $descripcion
+ */
 class Categoria extends Model
 {
     use HasFactory;
@@ -16,23 +23,19 @@ class Categoria extends Model
         'nombre',
         'slug',
         'descripcion',
-        'icono',
     ];
 
-    // Generar slug automáticamente al asignar el nombre
-    public static function boot()
+    // La columna slug es NOT NULL y UNIQUE en la BD: se genera al crear.
+    protected static function booted(): void
     {
-        parent::boot();
-
-        static::creating(function ($categoria) {
+        static::creating(function (Categoria $categoria) {
             if (empty($categoria->slug)) {
                 $categoria->slug = Str::slug($categoria->nombre);
             }
         });
     }
 
-    // Relación: Una categoría tiene muchos servicios
-    public function servicios()
+    public function servicios(): HasMany
     {
         return $this->hasMany(Servicio::class, 'categoria_id');
     }

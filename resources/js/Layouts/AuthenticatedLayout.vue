@@ -11,13 +11,9 @@ import Toast from '@/Components/Toast.vue'
 const showingNavigationDropdown = ref(false)
 const page = usePage()
 
-// Comprueba si el usuario tiene rol de administración
-const esAdmin = computed(() => {
-  const user = page.props.auth?.user
-  if (!user) return false
-  if (user.is_admin) return true
-  return user.roles?.some(r => ['admin', 'superadmin', 'Admin', 'SuperAdmin'].includes(r.name))
-})
+// Ambos flags los calcula HandleInertiaRequests a partir de los roles de Spatie.
+const esAdmin = computed(() => !!page.props.auth?.user?.esAdmin)
+const esPrestador = computed(() => !!page.props.auth?.user?.esPrestador)
 </script>
 
 <template>
@@ -51,9 +47,9 @@ const esAdmin = computed(() => {
                   Explorar Servicios
                 </NavLink>
 
-                <!-- Mostrar "Perfil Prestador" SOLO a usuarios que no son Administradores -->
+                <!-- "Perfil Prestador" solo para usuarios con rol prestador -->
                 <NavLink
-                  v-if="!esAdmin"
+                  v-if="esPrestador"
                   :href="route('prestador.perfil.edit')"
                   :active="route().current('prestador.perfil.edit')"
                 >
@@ -92,7 +88,7 @@ const esAdmin = computed(() => {
 
                   <template #content>
                     <!-- Opción prestador condicional -->
-                    <DropdownLink v-if="!esAdmin" :href="route('prestador.perfil.edit')">
+                    <DropdownLink v-if="esPrestador" :href="route('prestador.perfil.edit')">
                       Perfil de Prestador
                     </DropdownLink>
 
@@ -186,7 +182,7 @@ const esAdmin = computed(() => {
             </div>
 
             <div class="mt-3 space-y-1">
-              <ResponsiveNavLink v-if="!esAdmin" :href="route('prestador.perfil.edit')" :active="route().current('prestador.perfil.edit')">
+              <ResponsiveNavLink v-if="esPrestador" :href="route('prestador.perfil.edit')" :active="route().current('prestador.perfil.edit')">
                 Mi Perfil de Prestador / Servicios
               </ResponsiveNavLink>
               <ResponsiveNavLink :href="route('profile.edit')">

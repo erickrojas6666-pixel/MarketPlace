@@ -1,117 +1,155 @@
 <?php
+
 namespace App\Models;
-use Illuminate\Database\Eloquent\Factories\HasFactory;
+
 use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Collection;
-use Spatie\Permission\Traits\HasRoles;
-use Illuminate\Notifications\Notifiable;
+use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 use Illuminate\Foundation\Auth\User as Authenticatable;
+use Illuminate\Notifications\Notifiable;
+use Spatie\Permission\Traits\HasRoles;
 
 /**
- * Class User
- * 
  * @property int $id
  * @property string $nombre
  * @property string $email
- * @property string|null $telefono
  * @property string $password
- * @property string|null $google_id
- * @property Carbon|null $telefono_verificado_en
  * @property Carbon|null $email_verified_at
- * @property string|null $two_factor_code
- * @property bool $two_factor_enabled
- * @property Carbon|null $two_factor_expires_at
- * @property string $estado
  * @property string|null $remember_token
  * @property Carbon|null $created_at
  * @property Carbon|null $updated_at
- * 
- * @property Collection|Direccione[] $direcciones
- * @property Collection|Disputa[] $disputas
- * @property Collection|DocumentosVerificacion[] $documentos_verificacions
- * @property Collection|LogAuditorium[] $log_auditoria
- * @property Collection|Mensaje[] $mensajes
- * @property Collection|Pedido[] $pedidos
- * @property PerfilPrestador|null $perfiles_prestador
- * @property Collection|Resena[] $resenas
- * @property Collection|SuscripcionesPush[] $suscripciones_pushes
  *
- * @package App\Models
+ * @property PerfilPrestador|null $perfilPrestador
+ * @property Collection|Pedido[] $pedidos
+ * @property Collection|Resena[] $resenas
+ * @property Collection|Direccione[] $direcciones
+ * @property Collection|Mensaje[] $mensajes
+ * @property Collection|Disputa[] $disputasAbiertas
+ * @property Collection|Disputa[] $disputasMediadas
+ * @property Collection|DocumentosVerificacion[] $documentosRevisados
+ * @property Collection|LogAuditorium[] $registrosAuditoria
+ * @property Collection|SuscripcionesPush[] $suscripcionesPush
  */
 class User extends Authenticatable
 {
     use HasFactory, Notifiable, HasRoles;
-	protected $table = 'users';
 
-	protected $casts = [
-		'telefono_verificado_en' => 'datetime',
-		'email_verified_at' => 'datetime',
-		'two_factor_enabled' => 'bool',
-		'two_factor_expires_at' => 'datetime'
-	];
+    protected $table = 'users';
 
-	protected $hidden = [
-		'password',
-		'remember_token'
-	];
+    /**
+     * Solo lo que el propio usuario puede enviar desde un formulario.
+     *
+     * email_verified_at, estado, google_id, telefono_verificado_en y los campos
+     * de 2FA NO van aquí: si algún día se hace ->fill($request->all()), nadie
+     * podría verificarse la cuenta ni activarse el 2FA por asignación masiva.
+     * Esos campos se escriben de forma explícita ($user->forceFill([...])->save()).
+     */
+    protected $fillable = [
+        'nombre',
+        'email',
+        'password',
+    ];
 
-	protected $fillable = [
-		'nombre',
-		'email',
-		'telefono',
-		'password',
-		'google_id',
-		'telefono_verificado_en',
-		'email_verified_at',
-		'two_factor_code',
-		'two_factor_enabled',
-		'two_factor_expires_at',
-		'estado',
-		'remember_token'
-	];
+    /**
+     * Nunca deben serializarse hacia Inertia/Vue ni hacia JSON. Se incluyen
+     * google_id y two_factor_code por adelantado: si esas columnas se agregan
+     * a la BD, ya nacen protegidas.
+     */
+    protected $hidden = [
+        'password',
+        'remember_token',
+        'google_id',
+        'two_factor_code',
+    ];
 
-	public function direcciones()
-	{
-		return $this->hasMany(Direccione::class);
-	}
+    protected function casts(): array
+    {
+        return [
+            'email_verified_at' => 'datetime',
+        ];
+    }
 
-	public function disputas()
-	{
-		return $this->hasMany(Disputa::class, 'mediador_id');
-	}
+    /* -----------------------------------------------------------------
+     | Atajos de rol (evitan repetir cadenas de roles en controladores)
+     |-----------------------------------------------------------------*/
 
-	public function documentos_verificacions()
-	{
-		return $this->hasMany(DocumentosVerificacion::class, 'revisado_por');
-	}
+    public function esAdmin(): bool
+    {
+        return $this->hasAnyRole(['admin', 'superadmin']);
+    }
 
-	public function log_auditoria()
-	{
-		return $this->hasMany(LogAuditorium::class, 'actor_id');
-	}
+    public function esPrestador(): bool
+    {
+        return $this->hasRole('prestador');
+    }
 
-	public function mensajes()
-	{
-		return $this->hasMany(Mensaje::class, 'autor_id');
-	}
+    /** Prestador con perfil aprobado por el Verificador (RF-08). */
+    public function esPrestadorVerificado(): bool
+    {
+        return $this->esPrestador()
+            && $this->perfilPrestador?->estaVerificado() === true;
+    }
 
-	public function pedidos()
-	{
-		return $this->hasMany(Pedido::class, 'cliente_id');
-	}
+    /* -----------------------------------------------------------------
+     | Relaciones (llaves foráneas verificadas contra marketplace.sql)
+     |-----------------------------------------------------------------*/
 
-	public function perfilPrestador()
+    public function perfilPrestador(): HasOne
     {
         return $this->hasOne(PerfilPrestador::class, 'user_id');
     }
 
-	public function resenas()
-	{
-		return $this->hasMany(Resena::class, 'destinatario_id');
-	}
+    /** Pedidos que el usuario hizo como cliente. */
+    public function pedidos(): HasMany
+    {
+        return $this->hasMany(Pedido::class, 'cliente_id');
+    }
 
-	public function suscripciones_pushes()
-	{
-		return $this->hasMany(SuscripcionesPush::class);
-	}
+    /** Reseñas que el usuario escribió como cliente (resenas.cliente_id). */
+    public function resenas(): HasMany
+    {
+        return $this->hasMany(Resena::class, 'cliente_id');
+    }
+
+    public function direcciones(): HasMany
+    {
+        return $this->hasMany(Direccione::class, 'user_id');
+    }
+
+    /** Mensajes de chat enviados (mensajes.emisor_id). */
+    public function mensajes(): HasMany
+    {
+        return $this->hasMany(Mensaje::class, 'emisor_id');
+    }
+
+    /** Disputas que el usuario abrió como cliente (disputas.abierta_por). */
+    public function disputasAbiertas(): HasMany
+    {
+        return $this->hasMany(Disputa::class, 'abierta_por');
+    }
+
+    /** Disputas que atiende como mediador (disputas.mediador_id). */
+    public function disputasMediadas(): HasMany
+    {
+        return $this->hasMany(Disputa::class, 'mediador_id');
+    }
+
+    /** Documentos de verificación que revisó (documentos_verificacion.revisado_por). */
+    public function documentosRevisados(): HasMany
+    {
+        return $this->hasMany(DocumentosVerificacion::class, 'revisado_por');
+    }
+
+    /** Acciones del personal registradas en la bitácora (log_auditoria.actor_id). */
+    public function registrosAuditoria(): HasMany
+    {
+        return $this->hasMany(LogAuditorium::class, 'actor_id');
+    }
+
+    public function suscripcionesPush(): HasMany
+    {
+        return $this->hasMany(SuscripcionesPush::class, 'user_id');
+    }
 }

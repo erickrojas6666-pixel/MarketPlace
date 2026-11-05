@@ -2,141 +2,95 @@
 
 namespace App\Models;
 
-use Carbon\Carbon;
-use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
+use Illuminate\Database\Eloquent\Relations\HasOneThrough;
 
 /**
- * Class Pedido
- * 
  * @property int $id
  * @property int $cliente_id
- * @property int|null $prestador_id
  * @property int $servicio_id
- * @property int|null $nivel_id
- * @property int|null $direccion_id
  * @property string $estado
- * @property string|null $direccion_servicio
- * @property float|null $precio_total
- * @property float|null $comision_plataforma
- * @property Carbon|null $fecha_programada
- * @property Carbon|null $agendado_para
- * @property Carbon|null $created_at
- * @property Carbon|null $updated_at
- * 
- * @property User $user
- * @property Direccione|null $direccione
- * @property NivelesServicio|null $niveles_servicio
- * @property PerfilesPrestador|null $perfiles_prestador
- * @property Servicio $servicio
- * @property Collection|Cotizacione[] $cotizaciones
- * @property Disputa|null $disputa
- * @property Collection|Mensaje[] $mensajes
- * @property Pago|null $pago
- * @property Collection|Resena[] $resenas
- *
- * @package App\Models
+ * @property string $direccion_servicio
+ * @property \Carbon\Carbon|null $fecha_programada
  */
 class Pedido extends Model
 {
     use HasFactory;
 
+    public const PENDIENTE   = 'pendiente';
+    public const RECHAZADO   = 'rechazado';
+    public const ACEPTADO    = 'aceptado';
+    public const EN_PROGRESO = 'en_progreso';
+    public const COMPLETADO  = 'completado';
+    public const CANCELADO   = 'cancelado';
+
+    /** Mismos valores que el ENUM de la BD. */
+    public const ESTADOS = [
+        self::PENDIENTE,
+        self::RECHAZADO,
+        self::ACEPTADO,
+        self::EN_PROGRESO,
+        self::COMPLETADO,
+        self::CANCELADO,
+    ];
+
     protected $table = 'pedidos';
 
-    protected $casts = [
-        'cliente_id'          => 'int',
-        'prestador_id'        => 'int',
-        'servicio_id'         => 'int',
-        'nivel_id'            => 'int',
-        'direccion_id'        => 'int',
-        'precio_total'        => 'float',
-        'comision_plataforma' => 'float',
-        'fecha_programada'    => 'datetime',
-        'agendado_para'       => 'datetime',
-    ];
-
+    /** 'estado' sigue asignable porque los controladores actuales lo usan; pasará a la máquina de estados. */
     protected $fillable = [
         'cliente_id',
-        'prestador_id',
         'servicio_id',
-        'nivel_id',
-        'direccion_id',
         'estado',
         'direccion_servicio',
-        'precio_total',
-        'comision_plataforma',
         'fecha_programada',
-        'agendado_para',
     ];
 
-    // --- RELACIONES ORIGINALES ---
+    protected $casts = [
+        'cliente_id'       => 'integer',
+        'servicio_id'      => 'integer',
+        'fecha_programada' => 'datetime',
+    ];
 
-    public function user()
+    public function cliente(): BelongsTo
     {
         return $this->belongsTo(User::class, 'cliente_id');
     }
 
-    public function direccione()
+    /** Alias de cliente(): lo usan controladores y vistas existentes. */
+    public function user(): BelongsTo
     {
-        return $this->belongsTo(Direccione::class, 'direccion_id');
+        return $this->cliente();
     }
 
-    public function niveles_servicio()
-    {
-        return $this->belongsTo(NivelesServicio::class, 'nivel_id');
-    }
-
-    public function perfiles_prestador()
-    {
-        return $this->belongsTo(PerfilPrestador::class, 'prestador_id');
-    }
-
-    public function servicio()
+    public function servicio(): BelongsTo
     {
         return $this->belongsTo(Servicio::class);
     }
 
-    public function cotizaciones()
+    /** El prestador se obtiene a través del servicio (pedidos no tiene prestador_id). */
+    public function prestador(): HasOneThrough
     {
-        return $this->hasMany(Cotizacione::class);
+        return $this->hasOneThrough(
+            PerfilPrestador::class,
+            Servicio::class,
+            'id',                    // servicios.id
+            'id',                    // perfiles_prestador.id
+            'servicio_id',           // pedidos.servicio_id
+            'perfil_prestador_id'    // servicios.perfil_prestador_id
+        );
     }
 
-    public function disputa()
-    {
-        return $this->hasOne(Disputa::class);
-    }
-
-    public function mensajes()
-    {
-        return $this->hasMany(Mensaje::class);
-    }
-
-    public function pago()
-    {
-        return $this->hasOne(Pago::class);
-    }
-
-    public function resenas()
-    {
-        return $this->hasMany(Resena::class);
-    }
-
-    // --- ALIAS Y COMPATIBILIDAD CON VISTAS VUE/INERTIA ---
-
-    /**
-     * Alias de la relación cliente (mapea a la relación user)
-     */
-    public function cliente()
-    {
-        return $this->belongsTo(User::class, 'cliente_id');
-    }
-
-    /**
-     * Alias en singular para obtener la última reseña del pedido
-     */
-    public function resena()
+    public function resena(): HasOne
     {
         return $this->hasOne(Resena::class);
+    }
+
+    public function resenas(): HasMany
+    {
+        return $this->hasMany(Resena::class);
     }
 }
