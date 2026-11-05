@@ -42,6 +42,31 @@ class Servicio extends Model
         return $query->where('activo', true);
     }
 
+    /**
+     * Servicios cuyo prestador atiende el punto (lat, lng) dentro de $km.
+     * Agrega el atributo `distancia_km` y ordena del más cercano al más lejano.
+     *
+     * La distancia va en una subconsulta (no en un JOIN) para no chocar con
+     * columnas homónimas de perfiles_prestador (created_at, descripcion...).
+     * Del prestador nunca sale su latitud/longitud, solo la distancia redondeada.
+     */
+    public function scopeCercanosA(Builder $query, float $lat, float $lng, float $km): Builder
+    {
+        if (empty($query->getQuery()->columns)) {
+            $query->select('servicios.*');
+        }
+
+        return $query
+            ->whereHas('perfilPrestador', fn ($q) => $q->cercanosA($lat, $lng, $km))
+            ->addSelect([
+                'distancia_km' => PerfilPrestador::query()
+                    ->selectRaw('ROUND('.PerfilPrestador::SQL_DISTANCIA.', 1)', [$lat, $lng, $lat])
+                    ->whereColumn('perfiles_prestador.id', 'servicios.perfil_prestador_id')
+                    ->limit(1),
+            ])
+            ->orderBy('distancia_km');
+    }
+
     public function perfilPrestador(): BelongsTo
     {
         return $this->belongsTo(PerfilPrestador::class, 'perfil_prestador_id');

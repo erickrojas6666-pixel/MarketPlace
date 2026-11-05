@@ -12,6 +12,11 @@ use Inertia\Response;
 
 class ServicioController extends Controller
 {
+    /** Radios de búsqueda que el cliente puede elegir (km). */
+    private const RADIOS_KM = [5, 10, 25, 50];
+
+    private const RADIO_POR_DEFECTO_KM = 10;
+
     /**
      * Catálogo público de servicios.
      */
@@ -20,10 +25,18 @@ class ServicioController extends Controller
         $filtros = $request->validate([
             'categoria_id' => 'nullable|integer',
             'q'            => 'nullable|string|max:100',
+            // Ubicación del cliente: viaja solo en la búsqueda, no se guarda.
+            'lat'          => 'nullable|required_with:lng|numeric|between:-90,90',
+            'lng'          => 'nullable|required_with:lat|numeric|between:-180,180',
+            'radio_km'     => 'nullable|integer|in:'.implode(',', self::RADIOS_KM),
         ]);
 
         $categoriaId = $filtros['categoria_id'] ?? null;
         $busqueda    = $filtros['q'] ?? null;
+        $lat         = isset($filtros['lat']) ? (float) $filtros['lat'] : null;
+        $lng         = isset($filtros['lng']) ? (float) $filtros['lng'] : null;
+        $radioKm     = (int) ($filtros['radio_km'] ?? self::RADIO_POR_DEFECTO_KM);
+        $porCercania = $lat !== null && $lng !== null;
 
         // Catálogo público: solo servicios activos de prestadores verificados.
         // Del prestador solo viajan id y nombre (nunca correo ni otros datos).
@@ -39,6 +52,8 @@ class ServicioController extends Controller
                 fn ($q) => $q->where('estado_verificacion', PerfilPrestador::ESTADO_VERIFICADO)
             )
             ->when($categoriaId, fn ($q) => $q->where('categoria_id', $categoriaId))
+            // Con ubicación: solo prestadores que atienden ese punto, del más cercano al más lejano.
+            ->when($porCercania, fn ($q) => $q->cercanosA($lat, $lng, $radioKm))
             // El grupo evita que el orWhere anule el filtro de categoría y de activos.
             ->when($busqueda, fn ($q) => $q->where(function ($w) use ($busqueda) {
                 $w->where('titulo', 'like', "%{$busqueda}%")
@@ -54,6 +69,9 @@ class ServicioController extends Controller
             'filtros'    => [
                 'categoria_id' => $categoriaId,
                 'q'            => $busqueda,
+                'lat'          => $lat,
+                'lng'          => $lng,
+                'radio_km'     => $radioKm,
             ],
         ]);
     }

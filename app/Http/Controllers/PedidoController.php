@@ -10,6 +10,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
+use Illuminate\Validation\ValidationException;
 
 class PedidoController extends Controller
 {
@@ -34,19 +35,35 @@ class PedidoController extends Controller
     public function store(Request $request): RedirectResponse
     {
         $validated = $request->validate([
-            'servicio_id'        => 'required|exists:servicios,id',
+            'servicio_id'        => 'required|integer|exists:servicios,id',
             'direccion_servicio' => 'required|string|max:255',
-            'fecha_deseada'      => 'nullable|date',
+            'fecha_deseada'      => 'nullable|date|after_or_equal:today',
         ]);
 
         $servicio = Servicio::with('perfilPrestador.user')->findOrFail($validated['servicio_id']);
+        $perfil   = $servicio->perfilPrestador;
+
+        // El servicio debe estar publicado y su prestador verificado (RF-08):
+        // el catálogo ya filtra esto, pero el endpoint no debe fiarse del frontend.
+        if (! $servicio->activo || $perfil === null || ! $perfil->estaVerificado()) {
+            throw ValidationException::withMessages([
+                'servicio_id' => 'Este servicio no está disponible para contratación.',
+            ]);
+        }
+
+        // Nadie puede contratar su propio servicio.
+        if ($perfil->user_id === Auth::id()) {
+            throw ValidationException::withMessages([
+                'servicio_id' => 'No puedes contratar tu propio servicio.',
+            ]);
+        }
 
         // Insertar ÚNICAMENTE en las columnas que sí existen en MySQL:
         // cliente_id, servicio_id, estado, direccion_servicio, fecha_programada
         $pedido = Pedido::create([
             'cliente_id'         => Auth::id(),
             'servicio_id'        => $servicio->id,
-            'estado'             => 'pendiente',
+            'estado'             => Pedido::PENDIENTE,
             'direccion_servicio' => $validated['direccion_servicio'],
             'fecha_programada'   => $validated['fecha_deseada'] ?? now()->addDays(1),
         ]);
@@ -54,7 +71,7 @@ class PedidoController extends Controller
         // Notificar al prestador a través de las relaciones
         $prestadorUser = optional($servicio->perfilPrestador)->user;
         if ($prestadorUser) {
-            $prestadorUser->notify(new EstadoPedidoActualizado($pedido, 'pendiente'));
+            $prestadorUser->notify(new EstadoPedidoActualizado($pedido, Pedido::PENDIENTE));
         }
 
         return redirect()->back()->with('success', '¡Pedido solicitado exitosamente!');

@@ -68,7 +68,9 @@ Route::middleware('auth')->group(function () {
     Route::delete('/profile', [ProfileController::class, 'destroy'])->name('profile.destroy');
 
     // API de Geocodificación (Proxy Nominatim)
-    Route::get('/api/buscar-ubicacion', [UbicacionController::class, 'buscarUbicacion'])->name('api.ubicacion');
+    Route::get('/api/buscar-ubicacion', [UbicacionController::class, 'buscarUbicacion'])
+        ->middleware('throttle:20,1')
+        ->name('api.ubicacion');
 
     // Gestión de Pedidos y Estado
     Route::post('/pedidos', [PedidoController::class, 'store'])->name('pedidos.store');

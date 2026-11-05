@@ -1,7 +1,9 @@
 <script setup>
-import { ref } from 'vue'
+import { ref, computed } from 'vue'
 import { Head, useForm, router } from '@inertiajs/vue3'
 import AuthenticatedLayout from '@/Layouts/AuthenticatedLayout.vue'
+import BuscadorUbicacion from '@/Components/BuscadorUbicacion.vue'
+import { useGeolocalizacion, redondear } from '@/composables/useGeolocalizacion'
 
 const props = defineProps({
   perfil: Object,
@@ -13,7 +15,37 @@ const props = defineProps({
 const formPerfil = useForm({
   descripcion: props.perfil?.descripcion || '',
   ubicacion_aproximada: props.perfil?.ubicacion_aproximada || '',
+  latitud: props.perfil?.latitud ?? null,
+  longitud: props.perfil?.longitud ?? null,
+  radio_cobertura_km: props.perfil?.radio_cobertura_km ?? 10,
 })
+
+// --- Ubicación del prestador (para que los clientes lo encuentren por cercanía) ---
+const { cargando: ubicando, error: errorUbicacion, obtener } = useGeolocalizacion()
+
+const tieneUbicacion = computed(() => formPerfil.latitud !== null && formPerfil.longitud !== null)
+
+const fijarCoordenadas = (lat, lng) => {
+  formPerfil.latitud = redondear(lat)
+  formPerfil.longitud = redondear(lng)
+}
+
+const usarMiUbicacion = async () => {
+  const pos = await obtener()
+  if (pos) fijarCoordenadas(pos.lat, pos.lng)
+}
+
+const usarLugar = (lugar) => {
+  fijarCoordenadas(parseFloat(lugar.lat), parseFloat(lugar.lon))
+  if (!formPerfil.ubicacion_aproximada) {
+    formPerfil.ubicacion_aproximada = String(lugar.display_name || '').slice(0, 255)
+  }
+}
+
+const quitarUbicacion = () => {
+  formPerfil.latitud = null
+  formPerfil.longitud = null
+}
 
 // Formulario para publicar servicio
 const formServicio = useForm({
@@ -93,6 +125,57 @@ const cambiarEstadoServicio = (servId) => {
               />
             </div>
 
+            <!-- UBICACIÓN PARA BÚSQUEDA POR CERCANÍA -->
+            <div class="space-y-2 rounded border border-gray-200 dark:border-gray-700 p-3">
+              <label class="block text-xs font-bold dark:text-gray-200">Mi ubicación de trabajo</label>
+              <p class="text-xs text-gray-500 dark:text-gray-400">
+                Los clientes cercanos te encontrarán primero. Guardamos solo una posición aproximada
+                (unos 110 m) y nunca mostramos tus coordenadas, solo la distancia.
+              </p>
+
+              <div class="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  @click="usarMiUbicacion"
+                  :disabled="ubicando"
+                  class="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-xs font-semibold rounded transition"
+                >
+                  {{ ubicando ? 'Obteniendo...' : '📍 Usar mi ubicación' }}
+                </button>
+                <button
+                  v-if="tieneUbicacion"
+                  type="button"
+                  @click="quitarUbicacion"
+                  class="px-3 py-1.5 text-xs font-semibold text-red-600 hover:underline"
+                >
+                  Quitar ubicación
+                </button>
+              </div>
+
+              <p v-if="errorUbicacion" class="text-xs text-red-500">{{ errorUbicacion }}</p>
+              <p v-if="tieneUbicacion" class="text-xs text-emerald-600 dark:text-emerald-400">
+                Ubicación lista ({{ formPerfil.latitud }}, {{ formPerfil.longitud }}). Pulsa «Guardar» para confirmarla.
+              </p>
+              <p v-else class="text-xs text-gray-400">Aún no has definido tu ubicación.</p>
+
+              <div v-if="tieneUbicacion">
+                <label class="block text-xs font-bold dark:text-gray-200 mb-1">
+                  Radio de cobertura: {{ formPerfil.radio_cobertura_km }} km
+                </label>
+                <input
+                  v-model.number="formPerfil.radio_cobertura_km"
+                  type="range"
+                  min="1"
+                  max="100"
+                  class="w-full"
+                />
+              </div>
+
+              <span v-if="formPerfil.errors.latitud" class="block text-xs text-red-500">{{ formPerfil.errors.latitud }}</span>
+              <span v-if="formPerfil.errors.longitud" class="block text-xs text-red-500">{{ formPerfil.errors.longitud }}</span>
+              <span v-if="formPerfil.errors.radio_cobertura_km" class="block text-xs text-red-500">{{ formPerfil.errors.radio_cobertura_km }}</span>
+            </div>
+
             <button 
               type="submit" 
               :disabled="formPerfil.processing" 
@@ -101,6 +184,14 @@ const cambiarEstadoServicio = (servId) => {
               Guardar Datos del Perfil
             </button>
           </form>
+
+          <!-- Alternativa al GPS: buscar la dirección. Va fuera del <form> para no enviarlo. -->
+          <BuscadorUbicacion
+            embebido
+            seleccionable
+            titulo="¿Prefieres buscar tu dirección?"
+            @seleccionar="usarLugar"
+          />
         </div>
 
         <!-- FORMULARIO PARA CREAR SERVICIO -->

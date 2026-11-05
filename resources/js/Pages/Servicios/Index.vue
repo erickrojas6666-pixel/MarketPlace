@@ -2,12 +2,14 @@
 import { ref, watch, computed } from 'vue'
 import { Head, Link, router, usePage } from '@inertiajs/vue3'
 import AuthenticatedLayout from '@/Layouts/AuthenticatedLayout.vue'
+import BuscadorUbicacion from '@/Components/BuscadorUbicacion.vue'
+import { useGeolocalizacion, redondear } from '@/composables/useGeolocalizacion'
 
 const props = defineProps({
   // Paginador de Laravel: { data: [...], links: [...], total, ... }
   servicios: { type: Object, default: () => ({ data: [], links: [], total: 0 }) },
   categorias: { type: Array, default: () => [] },
-  filtros: { type: Object, default: () => ({ categoria_id: null, q: null }) },
+  filtros: { type: Object, default: () => ({ categoria_id: null, q: null, lat: null, lng: null, radio_km: 10 }) },
 })
 
 const page = usePage()
@@ -21,12 +23,24 @@ const enlaces = computed(() => props.servicios?.links ?? [])
 const busqueda = ref(props.filtros?.q ?? '')
 const categoriaId = ref(props.filtros?.categoria_id ? Number(props.filtros.categoria_id) : null)
 
+// Ubicación del cliente: solo viaja en la URL de la búsqueda, no se guarda en base de datos.
+const lat = ref(props.filtros?.lat != null ? Number(props.filtros.lat) : null)
+const lng = ref(props.filtros?.lng != null ? Number(props.filtros.lng) : null)
+const radioKm = ref(props.filtros?.radio_km ? Number(props.filtros.radio_km) : 10)
+const RADIOS = [5, 10, 25, 50]
+
+const { cargando: ubicando, error: errorUbicacion, obtener } = useGeolocalizacion()
+const hayUbicacion = computed(() => lat.value !== null && lng.value !== null)
+
 const aplicarFiltros = () => {
   router.get(
     route('servicios.index'),
     {
       q: busqueda.value || undefined,
       categoria_id: categoriaId.value || undefined,
+      lat: hayUbicacion.value ? lat.value : undefined,
+      lng: hayUbicacion.value ? lng.value : undefined,
+      radio_km: hayUbicacion.value ? radioKm.value : undefined,
     },
     { preserveState: true, preserveScroll: true, replace: true }
   )
@@ -40,6 +54,25 @@ watch(busqueda, () => {
 
 const seleccionarCategoria = (id) => {
   categoriaId.value = categoriaId.value === id ? null : id
+  aplicarFiltros()
+}
+
+const fijarUbicacion = (la, lo) => {
+  lat.value = redondear(la)
+  lng.value = redondear(lo)
+  aplicarFiltros()
+}
+
+const usarMiUbicacion = async () => {
+  const pos = await obtener()
+  if (pos) fijarUbicacion(pos.lat, pos.lng)
+}
+
+const usarLugar = (lugar) => fijarUbicacion(parseFloat(lugar.lat), parseFloat(lugar.lon))
+
+const quitarUbicacion = () => {
+  lat.value = null
+  lng.value = null
   aplicarFiltros()
 }
 
@@ -91,6 +124,54 @@ const precioDe = (s) => s?.precio_base ?? null
           class="w-full text-sm rounded-lg border-gray-300 dark:bg-gray-800 dark:text-white dark:border-gray-700"
         />
 
+        <!-- Cerca de mí -->
+        <section class="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 p-4 space-y-3">
+          <div class="flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              @click="usarMiUbicacion"
+              :disabled="ubicando"
+              class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-sm font-semibold rounded-lg transition"
+            >
+              {{ ubicando ? 'Obteniendo ubicación...' : '📍 Cerca de mí' }}
+            </button>
+
+            <template v-if="hayUbicacion">
+              <label class="text-sm text-gray-700 dark:text-gray-300 flex items-center gap-2">
+                Radio:
+                <select
+                  v-model.number="radioKm"
+                  @change="aplicarFiltros"
+                  class="text-sm rounded border-gray-300 dark:bg-gray-700 dark:text-white dark:border-gray-600"
+                >
+                  <option v-for="r in RADIOS" :key="r" :value="r">{{ r }} km</option>
+                </select>
+              </label>
+
+              <button type="button" @click="quitarUbicacion" class="text-sm text-red-600 hover:underline">
+                Quitar filtro de ubicación
+              </button>
+            </template>
+          </div>
+
+          <p v-if="errorUbicacion" class="text-sm text-red-500">{{ errorUbicacion }}</p>
+          <p v-if="hayUbicacion" class="text-xs text-emerald-600 dark:text-emerald-400">
+            Mostrando prestadores que atienden tu zona, del más cercano al más lejano.
+          </p>
+          <p class="text-xs text-gray-400">
+            Tu ubicación solo se usa para esta búsqueda; no se guarda en nuestros servidores.
+          </p>
+
+          <!-- La búsqueda por dirección usa una ruta que exige sesión -->
+          <BuscadorUbicacion
+            v-if="estaAutenticado"
+            embebido
+            seleccionable
+            titulo="¿Sin GPS? Busca tu dirección"
+            @seleccionar="usarLugar"
+          />
+        </section>
+
         <!-- Categorías (filtran al hacer clic) -->
         <section>
           <h3 class="text-xl font-bold text-gray-800 dark:text-gray-200 mb-4">
@@ -130,7 +211,9 @@ const precioDe = (s) => s?.precio_base ?? null
           </h3>
 
           <div v-if="lista.length === 0" class="bg-white dark:bg-gray-800 p-8 rounded-xl text-center text-gray-500 dark:text-gray-400 shadow-sm">
-            No hay servicios disponibles con esos filtros en este momento.
+            {{ hayUbicacion
+              ? 'No encontramos prestadores que atiendan tu zona con esos filtros. Prueba un radio mayor.'
+              : 'No hay servicios disponibles con esos filtros en este momento.' }}
           </div>
 
           <div v-else class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
@@ -151,6 +234,9 @@ const precioDe = (s) => s?.precio_base ?? null
                 <h4 class="text-lg font-bold text-gray-900 dark:text-white">
                   {{ servicio.titulo }}
                 </h4>
+                <p v-if="servicio.distancia_km != null" class="text-xs font-semibold text-emerald-600 dark:text-emerald-400 mt-1">
+                  📍 a {{ servicio.distancia_km }} km
+                </p>
                 <p class="text-sm text-gray-600 dark:text-gray-400 mt-2 line-clamp-3">
                   {{ servicio.descripcion }}
                 </p>
