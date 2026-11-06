@@ -1,18 +1,30 @@
 <script setup>
+import { computed, onUnmounted, ref } from 'vue';
 import GuestLayout from '@/Layouts/GuestLayout.vue';
 import InputError from '@/Components/InputError.vue';
 import InputLabel from '@/Components/InputLabel.vue';
 import TextInput from '@/Components/TextInput.vue';
-import { Head, Link, useForm } from '@inertiajs/vue3';
+import { Head, Link, useForm, router } from '@inertiajs/vue3';
 
 const form = useForm({
-    name: '',
+    nombre: '',
     email: '',
     password: '',
     password_confirmation: '',
     role: 'cliente',
     rol: 'cliente',
     tipo_usuario: 'cliente',
+});
+
+// Mensaje general para fallos que no son de validación (500, red caída, 419, etc.)
+const errorGeneral = ref('');
+
+// Errores que no pertenecen a ningún campo visible (ej. tipo_usuario)
+const erroresExtra = computed(() => {
+    const visibles = ['nombre', 'email', 'password', 'password_confirmation', 'role', 'rol'];
+    return Object.entries(form.errors)
+        .filter(([campo]) => !visibles.includes(campo))
+        .map(([, mensaje]) => mensaje);
 });
 
 const seleccionarRol = (rol) => {
@@ -22,10 +34,34 @@ const seleccionarRol = (rol) => {
 };
 
 const submit = () => {
+    errorGeneral.value = '';
+
     form.post(route('register'), {
+        onError: (errors) => {
+            if (!Object.keys(errors).length) {
+                errorGeneral.value = 'No se pudo crear la cuenta. Intenta de nuevo.';
+            }
+        },
         onFinish: () => form.reset('password', 'password_confirmation'),
     });
 };
+
+// Listeners globales de Inertia (se limpian al desmontar el componente)
+const quitarException = router.on('exception', () => {
+    errorGeneral.value = 'Ocurrió un error inesperado. Revisa tu conexión e inténtalo de nuevo.';
+});
+
+const quitarInvalid = router.on('invalid', (event) => {
+    event.preventDefault(); // evita el modal por defecto de Inertia
+    errorGeneral.value = event.detail.response.status === 419
+        ? 'Tu sesión expiró. Recarga la página e inténtalo de nuevo.'
+        : 'El servidor devolvió un error. Inténtalo más tarde.';
+});
+
+onUnmounted(() => {
+    quitarException();
+    quitarInvalid();
+});
 </script>
 
 <template>
@@ -38,24 +74,34 @@ const submit = () => {
         </div>
 
         <form @submit.prevent="submit" class="space-y-3.5">
+            <!-- Banner de errores generales -->
+            <div
+                v-if="errorGeneral || erroresExtra.length"
+                class="rounded-xl border border-red-200 bg-red-50 text-red-700 text-xs p-3"
+                role="alert"
+            >
+                <p v-if="errorGeneral">{{ errorGeneral }}</p>
+                <p v-for="(msg, i) in erroresExtra" :key="i">{{ msg }}</p>
+            </div>
+
             <!-- 1. Selector de Tipo de Usuario (Ancho completo) -->
             <div>
                 <label class="block text-principal font-bold text-xs uppercase tracking-wider mb-1.5">
                     ¿Cómo deseas usar OficiosYa?
                 </label>
-                
+
                 <div class="grid grid-cols-2 gap-3">
                     <!-- Opción: Cliente -->
                     <button
                         type="button"
                         @click="seleccionarRol('cliente')"
                         class="p-3 rounded-2xl border-2 text-left transition-all duration-200 flex flex-col justify-between relative group cursor-pointer"
-                        :class="form.role === 'cliente' 
-                            ? 'border-principal bg-principal text-white shadow-md' 
+                        :class="form.role === 'cliente'
+                            ? 'border-principal bg-principal text-white shadow-md'
                             : 'border-slate-200 bg-white text-grafito hover:border-slate-300'"
                     >
                         <div class="flex items-center justify-between w-full mb-1.5">
-                            <div 
+                            <div
                                 class="w-7 h-7 rounded-lg flex items-center justify-center transition-colors"
                                 :class="form.role === 'cliente' ? 'bg-white/15 text-acento' : 'bg-niebla text-principal'"
                             >
@@ -64,7 +110,7 @@ const submit = () => {
                                 </svg>
                             </div>
 
-                            <span 
+                            <span
                                 class="w-4 h-4 rounded-full flex items-center justify-center border text-[10px]"
                                 :class="form.role === 'cliente' ? 'bg-acento border-acento text-principal font-black' : 'border-slate-300'"
                             >
@@ -87,12 +133,12 @@ const submit = () => {
                         type="button"
                         @click="seleccionarRol('prestador')"
                         class="p-3 rounded-2xl border-2 text-left transition-all duration-200 flex flex-col justify-between relative group cursor-pointer"
-                        :class="form.role === 'prestador' 
-                            ? 'border-principal bg-principal text-white shadow-md' 
+                        :class="form.role === 'prestador'
+                            ? 'border-principal bg-principal text-white shadow-md'
                             : 'border-slate-200 bg-white text-grafito hover:border-slate-300'"
                     >
                         <div class="flex items-center justify-between w-full mb-1.5">
-                            <div 
+                            <div
                                 class="w-8 h-8 rounded-xl flex items-center justify-center transition-colors"
                                 :class="form.role === 'prestador' ? 'bg-white/15 text-acento' : 'bg-niebla text-principal'"
                             >
@@ -101,7 +147,7 @@ const submit = () => {
                                 </svg>
                             </div>
 
-                            <span 
+                            <span
                                 class="w-4 h-4 rounded-full flex items-center justify-center border text-[10px]"
                                 :class="form.role === 'prestador' ? 'bg-acento border-acento text-principal font-black' : 'border-slate-300'"
                             >
@@ -126,18 +172,18 @@ const submit = () => {
             <div class="grid grid-cols-1 md:grid-cols-2 gap-x-4 gap-y-3">
                 <!-- Nombre Completo -->
                 <div>
-                    <InputLabel for="name" value="Nombre Completo" class="text-principal font-bold text-xs uppercase tracking-wider" />
+                    <InputLabel for="nombre" value="Nombre Completo" class="text-principal font-bold text-xs uppercase tracking-wider" />
                     <TextInput
-                        id="name"
+                        id="nombre"
                         type="text"
                         class="mt-1 block w-full rounded-xl border-slate-300 focus:border-principal focus:ring-principal text-sm shadow-sm py-2 px-3 placeholder:text-slate-400"
-                        v-model="form.name"
+                        v-model="form.nombre"
                         required
                         autofocus
                         autocomplete="name"
                         placeholder="Ej. Juan Pérez"
                     />
-                    <InputError class="mt-1 text-xs" :message="form.errors.name" />
+                    <InputError class="mt-1 text-xs" :message="form.errors.nombre" />
                 </div>
 
                 <!-- Correo Electrónico -->

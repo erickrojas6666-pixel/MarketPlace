@@ -40,6 +40,12 @@ class RegisteredUserController extends Controller
             'tipo_usuario' => ['required', 'in:cliente,prestador'],
         ]);
 
+        Log::info('Registro: datos validados.', [
+            'nombre'       => $datos['nombre'],
+            'email'        => $datos['email'],
+            'tipo_usuario' => $datos['tipo_usuario'],
+        ]);
+        
         try {
             $user = DB::transaction(function () use ($datos) {
                 $user = User::create([
