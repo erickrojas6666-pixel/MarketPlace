@@ -1,4 +1,5 @@
 <script setup>
+import { ref, onMounted, onBeforeUnmount } from 'vue';
 import { Head, Link } from '@inertiajs/vue3';
 
 defineProps({
@@ -12,6 +13,56 @@ const handleImageError = (e) => {
         e.target.src = '/images/logo.jpg';
     }
 };
+
+/* ---------- Menú hamburguesa (móvil) ---------- */
+const menuAbierto = ref(false);
+
+/* ---------- Carrusel del hero ---------- */
+// Agrega aquí las rutas de las imágenes (están en public/images/carrusel).
+const IMAGENES_CARRUSEL = [
+    '/images/carrusel/1.jpg',
+    '/images/carrusel/2.jpg',
+    '/images/carrusel/3.jpg',
+];
+const INTERVALO_MS = 5000;
+
+const imagenes = ref([]);
+const indiceActual = ref(0);
+let temporizador = null;
+
+// Mezcla la lista al azar (Fisher-Yates): cada carga de la página tiene un orden distinto.
+const mezclar = (lista) => {
+    const copia = [...lista];
+    for (let i = copia.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [copia[i], copia[j]] = [copia[j], copia[i]];
+    }
+    return copia;
+};
+
+// Comprueba que la imagen exista, para que una ruta mal escrita no deje un hueco en el carrusel.
+const existe = (src) =>
+    new Promise((resolve) => {
+        const img = new Image();
+        img.onload = () => resolve(true);
+        img.onerror = () => resolve(false);
+        img.src = src;
+    });
+
+onMounted(async () => {
+    const resultados = await Promise.all(IMAGENES_CARRUSEL.map(existe));
+    imagenes.value = mezclar(IMAGENES_CARRUSEL.filter((_, i) => resultados[i]));
+
+    if (imagenes.value.length > 1) {
+        temporizador = setInterval(() => {
+            indiceActual.value = (indiceActual.value + 1) % imagenes.value.length;
+        }, INTERVALO_MS);
+    }
+});
+
+onBeforeUnmount(() => {
+    clearInterval(temporizador);
+});
 
 const categorias = [
     {
@@ -71,8 +122,8 @@ const categorias = [
                     </div>
                 </Link>
 
-                <!-- Acciones -->
-                <nav class="flex items-center gap-3 sm:gap-4">
+                <!-- Acciones (Escritorio) -->
+                <nav class="hidden sm:flex items-center gap-3 sm:gap-4">
                     <Link
                         v-if="$page.props.auth.user"
                         :href="route('dashboard')"
@@ -97,23 +148,93 @@ const categorias = [
                         </Link>
                     </template>
                 </nav>
+
+                <!-- Hamburguesa (Móvil) -->
+                <button
+                    type="button"
+                    @click="menuAbierto = !menuAbierto"
+                    class="sm:hidden inline-flex items-center justify-center rounded-xl p-2 text-white hover:bg-white/10 focus:outline-none transition"
+                    :aria-expanded="menuAbierto"
+                    aria-label="Abrir menú"
+                >
+                    <svg class="h-7 w-7" stroke="currentColor" fill="none" viewBox="0 0 24 24">
+                        <path
+                            v-if="!menuAbierto"
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
+                            stroke-width="2"
+                            d="M4 6h16M4 12h16M4 18h16"
+                        />
+                        <path
+                            v-else
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
+                            stroke-width="2"
+                            d="M6 18L18 6M6 6l12 12"
+                        />
+                    </svg>
+                </button>
+            </div>
+
+            <!-- Menú desplegable (Móvil) -->
+            <div v-show="menuAbierto" class="sm:hidden bg-white border-t border-slate-200 shadow-lg">
+                <div class="px-4 py-4 space-y-3">
+                    <Link
+                        v-if="$page.props.auth.user"
+                        :href="route('dashboard')"
+                        class="block w-full text-center px-4 py-3 text-sm font-bold text-white bg-principal hover:bg-slate-800 rounded-xl shadow-md transition-all duration-200"
+                    >
+                        Mi Panel
+                    </Link>
+
+                    <template v-else>
+                        <Link
+                            :href="route('login')"
+                            class="block w-full text-center px-4 py-3 text-sm font-bold text-principal bg-white hover:bg-niebla rounded-xl border-2 border-slate-200 transition-all duration-200"
+                        >
+                            Iniciar sesión
+                        </Link>
+
+                        <Link
+                            :href="route('register')"
+                            class="block w-full text-center px-4 py-3 text-sm font-bold text-principal bg-acento hover:bg-yellow-400 rounded-xl shadow-md transition-all duration-200"
+                        >
+                            Registrarse
+                        </Link>
+                    </template>
+                </div>
             </div>
         </header>
 
-        <!-- 2. Hero Section -->
-        <section class="bg-white py-20 px-4 sm:px-6 lg:px-8 border-b border-slate-300 shadow-sm relative overflow-hidden">
-            <div class="max-w-4xl mx-auto text-center space-y-6 relative z-10">
-                <span class="inline-flex items-center gap-2 py-1.5 px-4 rounded-full bg-niebla text-principal text-xs font-bold tracking-wider uppercase border border-principal/15">
+        <!-- 2. Hero Section con carrusel de imágenes -->
+        <section class="relative overflow-hidden flex items-center min-h-[560px] sm:min-h-[680px] py-20 px-4 sm:px-6 lg:px-8 border-b border-slate-300 shadow-sm bg-gradient-to-br from-principal via-principal to-[#1d4a8a]">
+            <!-- Carrusel (sin botones, cambia solo y en orden aleatorio) -->
+            <div class="absolute inset-0" aria-hidden="true">
+                <img
+                    v-for="(src, i) in imagenes"
+                    :key="src"
+                    :src="src"
+                    alt=""
+                    class="absolute inset-0 w-full h-full object-cover transition-opacity duration-1000 ease-in-out motion-reduce:transition-none"
+                    :class="i === indiceActual ? 'opacity-100' : 'opacity-0'"
+                />
+
+                <!-- Capa oscura para que el texto siempre se lea -->
+                <div class="absolute inset-0 bg-gradient-to-b from-principal/75 via-principal/60 to-principal/85"></div>
+            </div>
+
+            <div class="max-w-4xl mx-auto text-center space-y-6 relative z-10 w-full">
+                <span class="inline-flex items-center gap-2 py-1.5 px-4 rounded-full bg-white/10 backdrop-blur-sm text-niebla text-xs font-bold tracking-wider uppercase border border-white/20">
                     <span class="w-2 h-2 rounded-full bg-acento animate-pulse"></span>
                     Servicios profesionales a domicilio
                 </span>
 
-                <h1 class="text-4xl sm:text-6xl font-extrabold text-principal tracking-tight leading-tight">
+                <h1 class="text-4xl sm:text-6xl font-extrabold text-white tracking-tight leading-tight drop-shadow-lg">
                     El oficio que necesitas, <br class="hidden sm:inline" />
                     <span class="text-acento">justo a tiempo.</span>
                 </h1>
 
-                <p class="text-base sm:text-lg text-gris-medio max-w-2xl mx-auto font-normal">
+                <p class="text-base sm:text-lg text-niebla/90 max-w-2xl mx-auto font-normal drop-shadow">
                     Conectamos personas y empresas con prestadores calificados y verificados en tu zona.
                 </p>
 
