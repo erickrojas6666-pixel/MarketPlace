@@ -37,6 +37,10 @@ class HandleInertiaRequests extends Middleware
                 ] : null,
             ],
 
+            'marketplace' => [
+                'horasConfirmacion' => (int) config('marketplace.horas_confirmacion_automatica'),
+            ],
+
             // Lo lee Components/Toast.vue (page.props.flash).
             'flash' => [
                 'success' => fn () => $request->session()->get('success'),

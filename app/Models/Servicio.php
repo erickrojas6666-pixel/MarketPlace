@@ -16,6 +16,10 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
  * @property string $descripcion
  * @property string|null $precio_base
  * @property bool $activo
+ * @property-read PerfilPrestador $perfilPrestador
+ * @property-read Categoria $categoria
+ * @property-read \Illuminate\Database\Eloquent\Collection<int, Pedido> $pedidos
+ * @property-read \Illuminate\Database\Eloquent\Collection<int, Resena> $resenas
  */
 class Servicio extends Model
 {

@@ -19,6 +19,9 @@ use Illuminate\Database\Eloquent\Relations\HasManyThrough;
  * @property float|null $latitud
  * @property float|null $longitud
  * @property int $radio_cobertura_km
+ * @property-read User $user
+ * @property-read \Illuminate\Database\Eloquent\Collection<int, Servicio> $servicios
+ * @property-read \Illuminate\Database\Eloquent\Collection<int, DocumentosVerificacion> $documentos
  */
 class PerfilPrestador extends Model
 {

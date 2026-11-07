@@ -5,6 +5,9 @@ namespace App\Http\Controllers\Admin;
 use App\Http\Controllers\Controller;
 use App\Models\PerfilPrestador;
 use App\Notifications\EstadoVerificacionNotification;
+use App\Support\Auditoria;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\Rule;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Inertia\Inertia;
@@ -44,7 +47,7 @@ class VerificacionPrestadorController extends Controller
     public function updateStatus(Request $request, PerfilPrestador $perfil): RedirectResponse
     {
         $request->validate([
-            'estado' => 'required|string',
+            'estado' => ['required', 'string', Rule::in(['aprobado', 'verificado', 'rechazado', 'pendiente'])],
         ]);
 
         // Mapeo defensivo: el frontend envía 'aprobado', pero la BD MySQL espera 'verificado'
@@ -61,9 +64,22 @@ class VerificacionPrestadorController extends Controller
         }
 
         // Actualizar ÚNICAMENTE la columna que existe en la BD
-        $perfil->update([
-            'estado_verificacion' => $nuevoEstado,
-        ]);
+        // RF-52: el cambio y su rastro van juntos o no van.
+        DB::transaction(function () use ($perfil, $nuevoEstado) {
+            $anterior = $perfil->estado_verificacion;
+
+            $perfil->update([
+                'estado_verificacion' => $nuevoEstado,
+            ]);
+
+            Auditoria::registrar(
+                'prestador.verificacion_cambiada',
+                'perfil_prestador',
+                $perfil->id,
+                ['estado_verificacion' => $anterior],
+                ['estado_verificacion' => $nuevoEstado],
+            );
+        });
 
         // Notificar al usuario prestador en la tabla 'notifications'
         if ($perfil->user) {

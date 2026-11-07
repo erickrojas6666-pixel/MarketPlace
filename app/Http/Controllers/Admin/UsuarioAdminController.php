@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Admin;
 use App\Http\Controllers\Controller;
 use App\Models\PerfilPrestador;
 use App\Models\User;
+use App\Support\Auditoria;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -56,6 +57,8 @@ class UsuarioAdminController extends Controller
 
             $user->assignRole($request->role);
             $this->asegurarPerfilSiEsPrestador($user, $request->role);
+
+            Auditoria::registrar('usuario.creado', 'user', $user->id, null, ['rol' => $request->role]);
         });
 
         return redirect()->back()->with('success', 'Usuario administrativo creado exitosamente.');
@@ -71,6 +74,8 @@ class UsuarioAdminController extends Controller
             'email' => 'required|string|email|max:255|unique:users,email,' . $usuario->id,
             'role'  => 'required|string|exists:roles,name',
         ]);
+
+        $rolAnterior = $usuario->getRoleNames()->all();
 
         $usuario->update([
             'nombre' => $request->nombre,
@@ -90,6 +95,15 @@ class UsuarioAdminController extends Controller
         $usuario->syncRoles([$request->role]);
         $this->asegurarPerfilSiEsPrestador($usuario, $request->role);
 
+        // Sin contraseñas: solo quién cambió y qué rol tenía/tiene.
+        Auditoria::registrar(
+            'usuario.actualizado',
+            'user',
+            $usuario->id,
+            ['roles' => $rolAnterior],
+            ['roles' => [$request->role]],
+        );
+
         return redirect()->back()->with('success', 'Usuario y permisos actualizados.');
     }
 
@@ -101,6 +115,8 @@ class UsuarioAdminController extends Controller
         if ($usuario->id === Auth::id()) {
             return redirect()->back()->with('error', 'No puedes eliminar tu propia cuenta.');
         }
+
+        Auditoria::registrar('usuario.eliminado', 'user', $usuario->id, ['roles' => $usuario->getRoleNames()->all()], null);
 
         $usuario->delete();
 
