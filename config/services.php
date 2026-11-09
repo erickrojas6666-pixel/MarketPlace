@@ -35,4 +35,18 @@ return [
         ],
     ],
 
+    // Notificaciones push (Web Push + VAPID). Genera las llaves con: php artisan push:generar-vapid
+    'webpush' => [
+        'subject'     => env('VAPID_SUBJECT', 'mailto:admin@oficiosya.test'),
+        'public_key'  => env('VAPID_PUBLIC_KEY'),
+        'private_key' => env('VAPID_PRIVATE_KEY'),
+        // Anti-SSRF: solo se envía a estos servicios de push (y sus subdominios).
+        'hosts_permitidos' => [
+            'fcm.googleapis.com',          // Chrome, Brave, Edge en Android, Samsung
+            'push.services.mozilla.com',   // Firefox
+            'push.apple.com',              // Safari / iOS (web.push.apple.com)
+            'notify.windows.com',          // Edge / Windows
+        ],
+    ],
+
 ];

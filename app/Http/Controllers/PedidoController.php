@@ -7,6 +7,8 @@ use App\Models\Pedido;
 use App\Models\Servicio;
 use App\Notifications\EstadoPedidoActualizado;
 use App\Support\Auditoria;
+use App\Support\Idempotencia;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
@@ -19,7 +21,7 @@ class PedidoController extends Controller
     /**
      * El cliente solicita un servicio.
      */
-    public function store(Request $request): RedirectResponse
+    public function store(Request $request): RedirectResponse|JsonResponse
     {
         $validated = $request->validate([
             'servicio_id'        => 'required|integer|exists:servicios,id',
@@ -27,47 +29,63 @@ class PedidoController extends Controller
             'fecha_deseada'      => 'nullable|date|after_or_equal:today',
         ]);
 
-        $servicio = Servicio::with('perfilPrestador.user')->findOrFail($validated['servicio_id']);
-        $perfil   = $servicio->perfilPrestador;
+        // Idempotencia: la cola offline del cliente puede reintentar; con la misma
+        // cabecera Idempotency-Key el pedido se crea (y se notifica) una sola vez.
+        $resultado = Idempotencia::ejecutar($request, 'pedidos.store', function () use ($validated) {
+            $servicio = Servicio::with('perfilPrestador.user')->findOrFail($validated['servicio_id']);
+            $perfil   = $servicio->perfilPrestador;
 
-        // El servicio debe estar publicado y su prestador verificado (RF-08):
-        // el catálogo ya filtra esto, pero el endpoint no debe fiarse del frontend.
-        if (! $servicio->activo || $perfil === null || ! $perfil->estaVerificado()) {
-            throw ValidationException::withMessages([
-                'servicio_id' => 'Este servicio no está disponible para contratación.',
-            ]);
-        }
+            // El servicio debe estar publicado y su prestador verificado (RF-08):
+            // el catálogo ya filtra esto, pero el endpoint no debe fiarse del frontend.
+            if (! $servicio->activo || $perfil === null || ! $perfil->estaVerificado()) {
+                throw ValidationException::withMessages([
+                    'servicio_id' => 'Este servicio no está disponible para contratación.',
+                ]);
+            }
 
-        // Nadie puede contratar su propio servicio.
-        if ($perfil->user_id === Auth::id()) {
-            throw ValidationException::withMessages([
-                'servicio_id' => 'No puedes contratar tu propio servicio.',
-            ]);
-        }
+            // Nadie puede contratar su propio servicio.
+            if ($perfil->user_id === Auth::id()) {
+                throw ValidationException::withMessages([
+                    'servicio_id' => 'No puedes contratar tu propio servicio.',
+                ]);
+            }
 
-        // Insertar ÚNICAMENTE en las columnas que sí existen en MySQL:
-        // cliente_id, servicio_id, estado, direccion_servicio, fecha_programada
-        $pedido = DB::transaction(function () use ($validated, $servicio) {
-            $pedido = Pedido::create([
-                'cliente_id'         => Auth::id(),
-                'servicio_id'        => $servicio->id,
-                'estado'             => Pedido::PENDIENTE,
-                'direccion_servicio' => $validated['direccion_servicio'],
-                'fecha_programada'   => $validated['fecha_deseada'] ?? now()->addDays(1),
-            ]);
+            // Insertar ÚNICAMENTE en las columnas que sí existen en MySQL:
+            // cliente_id, servicio_id, estado, direccion_servicio, fecha_programada
+            $pedido = DB::transaction(function () use ($validated, $servicio) {
+                $pedido = Pedido::create([
+                    'cliente_id'         => Auth::id(),
+                    'servicio_id'        => $servicio->id,
+                    'estado'             => Pedido::PENDIENTE,
+                    'direccion_servicio' => $validated['direccion_servicio'],
+                    'fecha_programada'   => $validated['fecha_deseada'] ?? now()->addDays(1),
+                ]);
 
-            Auditoria::registrar('pedido.creado', 'pedido', $pedido->id, null, [
-                'estado'      => Pedido::PENDIENTE,
-                'servicio_id' => $servicio->id,
-            ]);
+                Auditoria::registrar('pedido.creado', 'pedido', $pedido->id, null, [
+                    'estado'      => Pedido::PENDIENTE,
+                    'servicio_id' => $servicio->id,
+                ]);
 
-            return $pedido;
+                return $pedido;
+            });
+
+            // Notificar al prestador a través de las relaciones
+            $prestadorUser = optional($servicio->perfilPrestador)->user;
+            if ($prestadorUser) {
+                $prestadorUser->notify(new EstadoPedidoActualizado($pedido, Pedido::PENDIENTE));
+            }
+
+            return ['pedido_id' => $pedido->id];
         });
 
-        // Notificar al prestador a través de las relaciones
-        $prestadorUser = optional($servicio->perfilPrestador)->user;
-        if ($prestadorUser) {
-            $prestadorUser->notify(new EstadoPedidoActualizado($pedido, Pedido::PENDIENTE));
+        $duplicado = $resultado['duplicado'] ?? false;
+
+        // Reenvío desde la cola offline (axios con Accept: application/json).
+        if ($request->wantsJson()) {
+            return response()->json(
+                ['pedido_id' => $resultado['pedido_id'], 'duplicado' => $duplicado],
+                $duplicado ? 200 : 201
+            );
         }
 
         return redirect()->back()->with('success', '¡Pedido solicitado exitosamente!');

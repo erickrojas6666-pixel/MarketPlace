@@ -1,0 +1,80 @@
+### Extensión "REST Client" de VS Code. Ajusta las variables y ejecuta cada bloque.
+@host = http://127.0.0.1:8000/api
+@token = PEGA_AQUI_EL_TOKEN
+
+### 1. Login (guarda el "token" de la respuesta en la variable de arriba)
+POST {{host}}/auth/login
+Content-Type: application/json
+Accept: application/json
+
+{ "email": "cliente@correo.com", "password": "tu-contraseña", "device_name": "rest-client" }
+
+### 1b. Mi usuario
+GET {{host}}/auth/me
+Accept: application/json
+Authorization: Bearer {{token}}
+
+### 2. Catálogo
+GET {{host}}/servicios?per_page=5
+Accept: application/json
+
+### 2b. Detalle
+GET {{host}}/servicios/1
+Accept: application/json
+
+### 3. Búsqueda por cercanía (ajusta lat/lng a tu zona)
+GET {{host}}/busqueda?lat=19.0414&lng=-98.2063&radio_km=15
+Accept: application/json
+
+### 4. Crear pedido (con clave de idempotencia: repetirlo NO duplica)
+POST {{host}}/pedidos
+Content-Type: application/json
+Accept: application/json
+Authorization: Bearer {{token}}
+Idempotency-Key: 3f1c9a52-7d3e-4b8e-9a61-0c2f5d7e1a11
+
+{ "servicio_id": 1, "direccion_servicio": "Calle 5 norte #10", "fecha_deseada": "2026-12-01" }
+
+### 4b. Mis pedidos
+GET {{host}}/pedidos
+Accept: application/json
+Authorization: Bearer {{token}}
+
+### 4c. Cambiar estado (como prestador: aceptado, en_progreso, completado...)
+PATCH {{host}}/pedidos/1/estado
+Content-Type: application/json
+Accept: application/json
+Authorization: Bearer {{token}}
+
+{ "estado": "aceptado" }
+
+### 5. Pagar (retener) un pedido aceptado
+POST {{host}}/pagos
+Content-Type: application/json
+Accept: application/json
+Authorization: Bearer {{token}}
+Idempotency-Key: 8a2b6c40-1e5d-4f7a-b3c9-6d1e0f2a9b22
+
+{ "pedido_id": 1 }
+
+### 5b. Liberar el pago (pedido confirmado)
+POST {{host}}/pagos/1/liberar
+Accept: application/json
+Authorization: Bearer {{token}}
+
+### 6. Reseñar un pedido confirmado
+POST {{host}}/resenas
+Content-Type: application/json
+Accept: application/json
+Authorization: Bearer {{token}}
+
+{ "pedido_id": 1, "calificacion": 5, "comentario": "Excelente trabajo" }
+
+### 6b. Reseñas de un servicio
+GET {{host}}/resenas?servicio_id=1
+Accept: application/json
+
+### Logout
+POST {{host}}/auth/logout
+Accept: application/json
+Authorization: Bearer {{token}}

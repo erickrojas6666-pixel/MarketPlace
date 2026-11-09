@@ -1,9 +1,11 @@
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { Head, router, useForm, usePage } from '@inertiajs/vue3'
 import AuthenticatedLayout from '@/Layouts/AuthenticatedLayout.vue'
 import BuscadorUbicacion from '@/Components/BuscadorUbicacion.vue'
 import { useGeolocalizacion, redondear } from '@/composables/useGeolocalizacion'
+import { encolar, mostrarAviso } from '@/offline/sync'
+import { guardarDashboard } from '@/offline/snapshots'
 
 const props = defineProps({
   esPrestador: { type: Boolean, default: false },
@@ -17,6 +19,21 @@ const props = defineProps({
 })
 
 const page = usePage()
+
+// --- Datos disponibles sin conexión (IndexedDB) ---
+// Se guarda una copia mínima cada vez que llegan datos nuevos del servidor.
+const guardarCopiaLocal = () => {
+  if (!navigator.onLine) return
+  guardarDashboard({
+    esPrestador: props.esPrestador,
+    pedidos: props.pedidos,
+    misPedidos: props.misPedidos,
+    todosLosServicios: props.todosLosServicios,
+    categorias: props.categorias,
+  })
+}
+onMounted(guardarCopiaLocal)
+watch(() => [props.pedidos, props.misPedidos, props.todosLosServicios], guardarCopiaLocal)
 
 // Única fuente de verdad: lo decide DashboardController (rol + perfil).
 const esPrestadorUser = computed(() => props.esPrestador)
@@ -188,7 +205,35 @@ const cerrarModal = () => {
   formPedido.clearErrors()
 }
 
-const solicitarServicioSubmit = () => {
+const solicitarServicioSubmit = async () => {
+  // Sin conexión: se guarda la solicitud y se envía sola al volver la red.
+  if (!navigator.onLine) {
+    if (!formPedido.direccion_servicio?.trim()) {
+      formPedido.setError('direccion_servicio', 'Escribe la dirección del servicio.')
+      return
+    }
+
+    const guardado = await encolar({
+      tipo: 'pedido.crear',
+      url: route('pedidos.store'),
+      datos: {
+        servicio_id: formPedido.servicio_id,
+        direccion_servicio: formPedido.direccion_servicio,
+        fecha_deseada: formPedido.fecha_deseada || null,
+      },
+      descripcion: `Solicitud de ${servicioASolicitar.value?.titulo ?? 'servicio'}`,
+    })
+
+    if (guardado) {
+      mostrarAviso('info', 'Sin conexión: guardamos tu solicitud y la enviaremos al volver la señal.')
+      servicioASolicitar.value = null
+      formPedido.reset()
+    } else {
+      mostrarAviso('error', 'No pudimos guardar tu solicitud en este dispositivo. Inténtalo con conexión.')
+    }
+    return
+  }
+
   formPedido.post(route('pedidos.store'), {
     preserveScroll: true,
     onSuccess: () => {

@@ -9,6 +9,7 @@ use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\PedidoController;
 use App\Http\Controllers\PerfilPrestadorController;
 use App\Http\Controllers\ProfileController;
+use App\Http\Controllers\PushController;
 use App\Http\Controllers\ResenaController;
 use App\Http\Controllers\ServicioController;
 use Illuminate\Foundation\Application;
@@ -61,6 +62,14 @@ Route::middleware('auth')->group(function () {
         Auth::user()->unreadNotifications->markAsRead();
         return redirect()->back()->with('success', 'Notificaciones marcadas como leídas.');
     })->name('notificaciones.marcarLeidas');
+
+    // Notificaciones push (alta y baja de la suscripción de este dispositivo)
+    Route::post('/push/suscripciones', [PushController::class, 'store'])
+        ->middleware('throttle:20,1')
+        ->name('push.suscribir');
+    Route::delete('/push/suscripciones', [PushController::class, 'destroy'])
+        ->middleware('throttle:20,1')
+        ->name('push.desuscribir');
 
     // Perfil General de Usuario
     Route::get('/profile', [ProfileController::class, 'edit'])->name('profile.edit');

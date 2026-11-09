@@ -76,6 +76,12 @@ class Servicio extends Model
         return $this->belongsTo(PerfilPrestador::class, 'perfil_prestador_id');
     }
 
+    /** Paquetes del servicio (básico / completo / avanzado). */
+    public function niveles(): HasMany
+    {
+        return $this->hasMany(NivelesServicio::class, 'servicio_id');
+    }
+
     public function categoria(): BelongsTo
     {
         return $this->belongsTo(Categoria::class);

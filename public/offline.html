@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#14305D">
+    <title>Sin conexión - OficiosYa</title>
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+            padding: 24px; background: #f3f4f6; color: #1f2937;
+            font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        }
+        main {
+            max-width: 420px; width: 100%; text-align: center; background: #fff;
+            border-radius: 16px; padding: 32px 24px; box-shadow: 0 4px 20px rgba(0,0,0,.08);
+        }
+        img { width: 88px; height: 88px; border-radius: 20px; }
+        h1 { margin: 16px 0 8px; font-size: 1.4rem; color: #14305D; }
+        p { margin: 0 0 20px; line-height: 1.5; color: #4b5563; }
+        button {
+            background: #14305D; color: #fff; border: 0; border-radius: 10px;
+            padding: 12px 24px; font-size: 1rem; font-weight: 600; cursor: pointer;
+        }
+        section { margin-top: 24px; text-align: left; }
+        section h2 { font-size: 1rem; margin: 0 0 8px; color: #14305D; }
+        section small { display: block; margin-bottom: 8px; color: #6b7280; }
+        ul { list-style: none; margin: 0; padding: 0; }
+        li { padding: 10px 12px; border: 1px solid #e5e7eb; border-radius: 10px; margin-bottom: 8px; font-size: .9rem; }
+        li span { display: block; color: #6b7280; font-size: .8rem; }
+        [hidden] { display: none; }
+        button:focus-visible { outline: 3px solid #93c5fd; outline-offset: 2px; }
+    </style>
+</head>
+<body>
+    <main role="main">
+        <img src="/icons/icon-192x192.png" alt="Logo de OficiosYa">
+        <h1>Sin conexión</h1>
+        <p>No pudimos conectarnos a internet. Revisa tu señal o tus datos móviles
+           y vuelve a intentarlo. Tus pedidos y pagos no se pierden.</p>
+        <button type="button" id="reintentar">Reintentar</button>
+
+        <section id="sec-pendientes" hidden>
+            <h2>Pendientes de enviar</h2>
+            <small>Se enviarán solas cuando vuelva la conexión.</small>
+            <ul id="lista-pendientes"></ul>
+        </section>
+        <section id="sec-pedidos" hidden>
+            <h2>Tus pedidos recientes</h2>
+            <small id="fecha-pedidos"></small>
+            <ul id="lista-pedidos"></ul>
+        </section>
+        <section id="sec-catalogo" hidden>
+            <h2>Servicios guardados</h2>
+            <ul id="lista-catalogo"></ul>
+        </section>
+    </main>
+    <script>
+        document.getElementById('reintentar').addEventListener('click', function () {
+            location.reload();
+        });
+
+        // --- Datos guardados en este dispositivo (IndexedDB "oficiosya") ---
+        // Se leen sin crear nada: si la base no existe, se cancela su creación.
+        // Todo se pinta con textContent (nunca innerHTML).
+        function abrirBd() {
+            return new Promise(function (resolve) {
+                if (!window.indexedDB) return resolve(null);
+                var req = indexedDB.open('oficiosya');
+                req.onupgradeneeded = function () { req.transaction.abort(); };
+                req.onerror = function () { resolve(null); };
+                req.onsuccess = function () { resolve(req.result); };
+            });
+        }
+
+        function leer(db, almacen, clave) {
+            return new Promise(function (resolve) {
+                try {
+                    var tx = db.transaction(almacen, 'readonly');
+                    var req = clave === undefined ? tx.objectStore(almacen).getAll() : tx.objectStore(almacen).get(clave);
+                    req.onsuccess = function () { resolve(req.result); };
+                    req.onerror = function () { resolve(null); };
+                } catch (e) { resolve(null); }
+            });
+        }
+
+        function pintar(idLista, idSeccion, items, texto) {
+            if (!items || !items.length) return;
+            var ul = document.getElementById(idLista);
+            items.forEach(function (it) {
+                var li = document.createElement('li');
+                var t = texto(it);
+                li.textContent = t[0];
+                if (t[1]) { var sp = document.createElement('span'); sp.textContent = t[1]; li.appendChild(sp); }
+                ul.appendChild(li);
+            });
+            document.getElementById(idSeccion).hidden = false;
+        }
+
+        abrirBd().then(async function (db) {
+            if (!db) return;
+            var cola = await leer(db, 'cola');
+            var pedidos = await leer(db, 'cache', 'pedidos');
+            var catalogo = await leer(db, 'cache', 'catalogo');
+            db.close();
+
+            pintar('lista-pendientes', 'sec-pendientes', cola, function (a) {
+                return [a.descripcion || a.tipo, 'Guardado ' + new Date(a.creadoEn).toLocaleString('es-MX')];
+            });
+            if (pedidos && pedidos.valor) {
+                pintar('lista-pedidos', 'sec-pedidos', pedidos.valor, function (p) {
+                    return ['#' + p.id + ' · ' + p.servicio, p.estado + (p.contraparte ? ' · ' + p.contraparte : '')];
+                });
+                document.getElementById('fecha-pedidos').textContent =
+                    'Última actualización: ' + new Date(pedidos.guardadoEn).toLocaleString('es-MX');
+            }
+            if (catalogo && catalogo.valor) {
+                pintar('lista-catalogo', 'sec-catalogo', catalogo.valor.slice(0, 10), function (s) {
+                    return [s.titulo, [s.categoria, s.prestador, s.precio ? '$' + s.precio : null].filter(Boolean).join(' · ')];
+                });
+            }
+        });
+
+        // Al volver la conexión, regresa a la página que se intentó abrir.
+        window.addEventListener('online', function () { location.reload(); });
+    </script>
+</body>
+</html>

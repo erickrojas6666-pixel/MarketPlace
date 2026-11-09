@@ -2,7 +2,7 @@
 <html lang="{{ str_replace('_', '-', app()->getLocale()) }}">
     <head>
         <meta charset="utf-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 
         <title inertia>{{ config('app.name', 'Laravel') }}</title>
 
@@ -14,6 +14,11 @@
         <link rel="apple-touch-icon" sizes="180x180" href="/icons/apple-touch-icon-180x180.png">
         <link rel="manifest" href="/manifest.json">
         <meta name="theme-color" content="#14305D">
+        <meta name="mobile-web-app-capable" content="yes">
+        <meta name="apple-mobile-web-app-capable" content="yes">
+        <meta name="apple-mobile-web-app-title" content="OficiosYa">
+        <meta name="apple-mobile-web-app-status-bar-style" content="default">
+        <meta name="vapid-public-key" content="{{ config('services.webpush.public_key') }}">
 
         <!-- Scripts -->
         @routes
