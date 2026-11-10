@@ -126,11 +126,11 @@ const pedidosActivosCliente = computed(
   () => props.misPedidos.filter((p) => ['pendiente', 'aceptado', 'en_progreso'].includes(p.estado)).length
 )
 const pedidosCompletadosCliente = computed(
-  () => props.misPedidos.filter((p) => p.estado === 'completado').length
+  () => props.misPedidos.filter((p) => ['completado', 'confirmado'].includes(p.estado)).length
 )
 const serviciosActivos = computed(() => props.servicios.filter((s) => s.activo).length)
 const pedidosPorAtender = computed(
-  () => props.pedidos.filter((p) => ['pendiente', 'aceptado', 'en_progreso'].includes(p.estado)).length
+  () => props.pedidos.filter((p) => ['pendiente', 'aceptado', 'pagado', 'en_progreso'].includes(p.estado)).length
 )
 
 // --- FILTROS DE BÚSQUEDA Y ESPECIALIDAD PARA CLIENTE ---
