@@ -13,38 +13,53 @@ import { desuscribirPush, refrescarEstadoPush, sincronizarSuscripcion } from './
 const appName = import.meta.env.VITE_APP_NAME || 'Laravel';
 
 createInertiaApp({
-    title: (title) => `${title} - ${appName}`,
+    title: (title) => (title ? `${title} - ${appName}` : appName),
     resolve: (name) =>
         resolvePageComponent(
             `./Pages/${name}.vue`,
             import.meta.glob('./Pages/**/*.vue'),
         ),
     setup({ el, App, props, plugin }) {
+        // Inicializar Service Worker
         iniciarPwa();
 
         // Datos locales (IndexedDB): ligados al usuario y borrados al cerrar sesión.
         let ultimoUsuario = null;
         const alCambiarUsuario = (id) => {
             setUsuario(id);
-            if (id !== null && id !== ultimoUsuario) sincronizarSuscripcion(); // asocia este dispositivo a la cuenta
+            if (id !== null && id !== ultimoUsuario) {
+                sincronizarSuscripcion(); // Asocia este dispositivo a la cuenta
+            }
             ultimoUsuario = id;
         };
+
         alCambiarUsuario(props.initialPage.props.auth?.user?.id ?? null);
         refrescarEstadoPush();
-        router.on('navigate', (event) => alCambiarUsuario(event.detail.page.props.auth?.user?.id ?? null));
 
-        // Al cerrar sesión, primero se da de baja el push de este dispositivo
-        // (con la sesión aún válida) para que el siguiente usuario no reciba avisos ajenos.
+        router.on('navigate', (event) => {
+            alCambiarUsuario(event.detail.page.props.auth?.user?.id ?? null);
+        });
+
+        // Interceptación de Logout para cancelar Push Notifications antes de perder la sesión
         let saliendo = false;
         router.on('before', (event) => {
             const visita = event.detail.visit;
-            if (saliendo || visita.method !== 'post' || visita.url.pathname !== '/logout') return;
+            const esLogout = visita.method === 'post' && (visita.url.pathname === '/logout' || visita.url.href.includes('/logout'));
+
+            if (!esLogout || saliendo) return;
 
             event.preventDefault();
             saliendo = true;
-            desuscribirPush().finally(() => router.post(route('logout')));
+
+            desuscribirPush().finally(() => {
+                router.post(route('logout'), {}, {
+                    onFinish: () => {
+                        saliendo = false;
+                    }
+                });
+            });
         });
-        router.on('finish', () => (saliendo = false));
+
         iniciarSync();
         alSincronizar(() => router.reload({ preserveScroll: true }));
 

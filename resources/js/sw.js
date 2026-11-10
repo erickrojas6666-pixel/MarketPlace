@@ -7,12 +7,12 @@ import { CacheableResponsePlugin } from 'workbox-cacheable-response';
 
 const OFFLINE_URL = '/offline.html';
 
-// --- PWA-02: precache del app shell ------------------------------------------
-precacheAndRoute(self.__WB_MANIFEST);
+// --- PWA-02: Precache del app shell ------------------------------------------
+precacheAndRoute(self.__WB_MANIFEST || []);
 cleanupOutdatedCaches();
 clientsClaim();
 
-// --- PWA-12: el cliente decide cuándo activar la nueva versión ---------------
+// --- PWA-12: Activación solicitada por el cliente -----------------------------
 self.addEventListener('message', (event) => {
     if (event.data && event.data.type === 'SKIP_WAITING') {
         self.skipWaiting();
@@ -20,10 +20,6 @@ self.addEventListener('message', (event) => {
 });
 
 // --- PWA-06: Background Sync --------------------------------------------------
-// Cuando el navegador recupera la red dispara "sync". Las acciones pendientes
-// viven en IndexedDB y se envían desde la página (necesita la sesión y el token
-// CSRF), así que el SW solo despierta a las pestañas abiertas.
-// Limitación: si la app está cerrada no hay pestaña que envíe; se sincroniza al abrirla.
 self.addEventListener('sync', (event) => {
     if (event.tag !== 'oficiosya-sync') return;
 
@@ -34,9 +30,7 @@ self.addEventListener('sync', (event) => {
     );
 });
 
-// --- PWA-07: notificaciones push ------------------------------------------------
-// El payload es JSON { titulo, cuerpo, url, tag } enviado por WebPushService (Laravel).
-// El texto es corto y sin datos sensibles porque se muestra en la pantalla de bloqueo.
+// --- PWA-07: Notificaciones Push ----------------------------------------------
 function urlSegura(url) {
     try {
         const destino = new URL(url, self.location.origin);
@@ -54,7 +48,6 @@ self.addEventListener('push', (event) => {
         datos = {};
     }
 
-    // Los navegadores exigen mostrar siempre una notificación (userVisibleOnly).
     event.waitUntil(
         self.registration.showNotification(String(datos.titulo || 'OficiosYa').slice(0, 80), {
             body: String(datos.cuerpo || 'Tienes una novedad en tu cuenta.').slice(0, 200),
@@ -81,7 +74,7 @@ self.addEventListener('notificationclick', (event) => {
                     try {
                         await ventana.navigate(destino);
                     } catch {
-                        /* ventana no controlada: basta con enfocarla */
+                        /* Ventana no controlada: basta con enfocarla */
                     }
                     return;
                 }
@@ -92,12 +85,12 @@ self.addEventListener('notificationclick', (event) => {
     );
 });
 
-// --- PWA-03: cache-first para estáticos ---------------------------------------
+// --- PWA-03: Cache-First para estáticos ---------------------------------------
 registerRoute(
     ({ request, url }) =>
         url.origin === self.location.origin &&
         (request.destination === 'image' || request.destination === 'font') &&
-        !url.pathname.startsWith('/build/'), // /build/ ya está en el precache
+        !url.pathname.startsWith('/build/'),
     new CacheFirst({
         cacheName: 'oficiosya-estaticos',
         plugins: [
@@ -107,7 +100,7 @@ registerRoute(
     }),
 );
 
-// Fuentes externas (fonts.bunny.net): hoja de estilos + archivos de fuente.
+// Fuentes externas (fonts.bunny.net)
 registerRoute(
     ({ url }) => url.origin === 'https://fonts.bunny.net',
     new StaleWhileRevalidate({
@@ -119,8 +112,7 @@ registerRoute(
     }),
 );
 
-// --- PWA-04: página offline de respaldo para navegaciones --------------------
-// Las páginas siempre se piden a la red; solo si falla se muestra offline.html.
+// --- PWA-04: Página offline de respaldo para navegaciones --------------------
 const soloRed = new NetworkOnly();
 
 registerRoute(

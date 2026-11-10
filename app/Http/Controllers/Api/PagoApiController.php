@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Actions\Pagos\IniciarPagoMercadoPago;
 use App\Actions\Pagos\LiberarPago;
 use App\Actions\Pagos\RetenerPago;
 use App\Http\Controllers\Controller;
@@ -47,14 +48,29 @@ class PagoApiController extends Controller
         return new PagoResource($pago->load('transacciones'));
     }
 
-    /** El cliente paga: el dinero queda retenido por la plataforma. */
-    public function store(Request $request, RetenerPago $retener): JsonResponse
+    /**
+     * El cliente paga. Según MARKETPLACE_PASARELA:
+     *  - simulada: el dinero queda retenido al instante (sin dinero real).
+     *  - mercadopago: se crea el pago "pendiente" y se devuelve `checkout_url`; el dinero se
+     *    considera retenido cuando Mercado Pago confirma (webhook o regreso del cliente).
+     */
+    public function store(Request $request, RetenerPago $retener, IniciarPagoMercadoPago $iniciarMercadoPago): JsonResponse
     {
         $datos = $request->validate([
             'pedido_id' => ['required', 'integer', 'exists:pedidos,id'],
         ]);
 
         $usuario = $request->user();
+
+        if (config('marketplace.pasarela') === 'mercadopago') {
+            // Repetir la petición reutiliza el pago pendiente, así que no duplica.
+            [$pago, $url] = $iniciarMercadoPago->ejecutar($usuario, (int) $datos['pedido_id']);
+
+            return (new PagoResource($pago))
+                ->additional(['checkout_url' => $url])
+                ->response()
+                ->setStatusCode(201);
+        }
 
         $resultado = Idempotencia::ejecutar(
             $request,

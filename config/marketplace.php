@@ -13,6 +13,13 @@ return [
     // Comisión de la plataforma sobre cada trabajo concretado (10 % a 15 % según el documento).
     'comision_porcentaje' => (float) env('MARKETPLACE_COMISION', 12),
 
+    // Correo transaccional: 'resend' (API REST) o 'smtp' (usa MAIL_* de Laravel; MAIL_MAILER=log para probar).
+    'correo' => env('MARKETPLACE_CORREO', 'resend'),
+
+    // Pasarela de pago: 'simulada' (por defecto; retiene el pago al instante, sin dinero real)
+    // o 'mercadopago' (Checkout Pro; requiere MP_ACCESS_TOKEN).
+    'pasarela' => env('MARKETPLACE_PASARELA', 'simulada'),
+
     // Interruptores de módulos (ver TransicionesPedido::mapa()).
     'cotizaciones_habilitadas' => (bool) env('MARKETPLACE_COTIZACIONES', false),
     'escrow_habilitado'        => (bool) env('MARKETPLACE_ESCROW', false),

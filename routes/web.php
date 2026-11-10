@@ -7,6 +7,8 @@ use App\Http\Controllers\Api\UbicacionController;
 use App\Http\Controllers\CategoriaController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\PedidoController;
+use App\Http\Controllers\PagoRetornoController;
+use App\Http\Controllers\PagoWebController;
 use App\Http\Controllers\PerfilPrestadorController;
 use App\Http\Controllers\ProfileController;
 use App\Http\Controllers\PushController;
@@ -84,6 +86,12 @@ Route::middleware('auth')->group(function () {
     // Gestión de Pedidos y Estado
     Route::post('/pedidos', [PedidoController::class, 'store'])->name('pedidos.store');
     Route::patch('/pedidos/{pedido}/estado', [PedidoController::class, 'updateEstado'])->name('pedidos.updateEstado');
+
+    // Pago del pedido (botón "Pagar") y regreso desde Mercado Pago
+    Route::post('/pedidos/{pedido}/pagar', [PagoWebController::class, 'pagar'])
+        ->middleware('throttle:20,1')
+        ->name('pedidos.pagar');
+    Route::get('/pagos/retorno', PagoRetornoController::class)->name('pagos.retorno');
 
     // Reseñas y Calificaciones (Clientes)
     Route::post('/resenas', [ResenaController::class, 'store'])->name('resenas.store');

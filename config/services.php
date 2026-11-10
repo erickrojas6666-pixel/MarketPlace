@@ -18,8 +18,20 @@ return [
         'key' => env('POSTMARK_API_KEY'),
     ],
 
+    // Correos transaccionales (Resend, vía su API REST). Sin llave, simplemente no se envían correos.
     'resend' => [
-        'key' => env('RESEND_API_KEY'),
+        'key'  => env('RESEND_API_KEY'),
+        'from' => env('RESEND_FROM', 'OficiosYa <onboarding@resend.dev>'),
+    ],
+
+    // Pagos (Mercado Pago, Checkout Pro). Solo se usa con MARKETPLACE_PASARELA=mercadopago.
+    'mercadopago' => [
+        'access_token'     => env('MP_ACCESS_TOKEN'),
+        'webhook_secret'   => env('MP_WEBHOOK_SECRET'),   // opcional: firma de las notificaciones
+        // false (recomendado): se usa init_point. Mercado Pago indica que sandbox_init_point suele dar
+        // el error "Oh, no, algo anduvo mal"; las pruebas de Checkout Pro se hacen con cuentas de prueba.
+        'sandbox'          => (bool) env('MP_SANDBOX', false),
+        'notification_url' => env('MP_NOTIFICATION_URL'), // URL pública https (túnel); opcional en local
     ],
 
     'ses' => [

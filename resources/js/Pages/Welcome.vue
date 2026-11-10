@@ -114,7 +114,7 @@ const categorias = [
                 <Link href="/" class="flex items-center">
                     <div class="bg-white px-4 py-2 rounded-2xl shadow-md flex items-center border border-white/30 transition-transform duration-200 hover:scale-105">
                         <img 
-                            src="/images/logo.png" 
+                            src="/images/logo.jpg" 
                             @error="handleImageError"
                             alt="OficiosYa Logo" 
                             class="h-11 sm:h-13 w-auto object-contain"

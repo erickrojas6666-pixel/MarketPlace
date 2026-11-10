@@ -3,6 +3,7 @@ import { ref, computed } from 'vue'
 import { Head, useForm, router } from '@inertiajs/vue3'
 import AuthenticatedLayout from '@/Layouts/AuthenticatedLayout.vue'
 import BuscadorUbicacion from '@/Components/BuscadorUbicacion.vue'
+import MapaUbicacion from '@/Components/MapaUbicacion.vue'
 import { useGeolocalizacion, redondear } from '@/composables/useGeolocalizacion'
 
 const props = defineProps({
@@ -157,6 +158,15 @@ const cambiarEstadoServicio = (servId) => {
                 Ubicación lista ({{ formPerfil.latitud }}, {{ formPerfil.longitud }}). Pulsa «Guardar» para confirmarla.
               </p>
               <p v-else class="text-xs text-gray-400">Aún no has definido tu ubicación.</p>
+
+              <!-- Mapa (OpenStreetMap): permite ajustar la ubicación a mano -->
+              <MapaUbicacion
+                editable
+                :lat="tieneUbicacion ? Number(formPerfil.latitud) : null"
+                :lng="tieneUbicacion ? Number(formPerfil.longitud) : null"
+                :radio-km="tieneUbicacion && formPerfil.radio_cobertura_km ? Number(formPerfil.radio_cobertura_km) : null"
+                @cambiar="({ lat, lng }) => fijarCoordenadas(lat, lng)"
+              />
 
               <div v-if="tieneUbicacion">
                 <label class="block text-xs font-bold dark:text-gray-200 mb-1">

@@ -290,6 +290,11 @@ const cambiarEstadoPedido = (pedidoId, nuevoEstado) => {
   )
 }
 
+// Pago del pedido: con la pasarela real el servidor responde con una redirección a Mercado Pago.
+const pagarPedido = (pedidoId) => {
+  router.post(route('pedidos.pagar', pedidoId), {}, { preserveScroll: true })
+}
+
 const marcarNotificacionesLeidas = () => {
   router.post(route('notificaciones.marcarLeidas'), {}, { preserveScroll: true })
 }
@@ -902,10 +907,25 @@ const marcarNotificacionesLeidas = () => {
                   </svg>
                   Cancelar
                 </button>
+
+                <button
+                  v-if="p.estado === 'aceptado'"
+                  @click="pagarPedido(p.id)"
+                  class="shrink-0 px-4 py-2 bg-principal text-white text-xs font-bold rounded-xl shadow-sm hover:bg-slate-800 transition active:scale-95"
+                >
+                  Pagar
+                </button>
+                <button
+                  v-if="p.estado === 'completado'"
+                  @click="cambiarEstadoPedido(p.id, 'confirmado')"
+                  class="shrink-0 px-4 py-2 bg-acento text-principal text-xs font-bold rounded-xl shadow-sm hover:brightness-95 transition active:scale-95"
+                >
+                  Confirmar trabajo
+                </button>
               </div>
 
-              <!-- Reseña -->
-              <div v-if="p.estado === 'completado'" class="pt-4 border-t border-slate-200">
+              <!-- Reseña: el backend solo acepta calificar pedidos confirmados -->
+              <div v-if="p.estado === 'confirmado'" class="pt-4 border-t border-slate-200">
                 <div v-if="p.resena" class="space-y-1">
                   <div class="flex items-center gap-2">
                     <span class="text-xs font-bold text-principal uppercase tracking-wider">Tu reseña</span>
