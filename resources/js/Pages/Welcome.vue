@@ -344,7 +344,7 @@ const categorias = [
                 <div class="flex items-center gap-3">
                     <div class="bg-white px-3 py-1.5 rounded-xl shadow-sm">
                         <img 
-                            src="/images/logo.png" 
+                            src="/images/logo.jpg" 
                             @error="handleImageError"
                             alt="OficiosYa" 
                             class="h-7 w-auto object-contain" 
