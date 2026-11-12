@@ -13,11 +13,6 @@ return new class extends Migration
 {
     public function up(): void
     {
-        // Si la BD ya viene creada (por ejemplo desde marketplace.sql), no se toca.
-        if (Schema::hasTable('roles')) {
-            return;
-        }
-
         Schema::create('permissions', function (Blueprint $table) {
             $table->id();
             $table->string('name');
