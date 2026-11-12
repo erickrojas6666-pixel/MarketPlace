@@ -119,6 +119,7 @@ Route::middleware(['auth', 'role:admin|superadmin|Admin|SuperAdmin'])
 
         // Verificación de Prestadores
         Route::get('/prestadores', [VerificacionPrestadorController::class, 'index'])->name('prestadores.index');
+        Route::get('/prestadores/{perfil}', [VerificacionPrestadorController::class, 'show'])->name('prestadores.show');
         Route::patch('/prestadores/{perfil}/estado', [VerificacionPrestadorController::class, 'updateStatus'])->name('prestadores.updateStatus');
 
         // CRUDs de Gestión

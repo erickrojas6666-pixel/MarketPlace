@@ -3,7 +3,9 @@
 namespace App\Http\Controllers\Admin;
 
 use App\Http\Controllers\Controller;
+use App\Models\Pedido;
 use App\Models\PerfilPrestador;
+use App\Models\Resena;
 use App\Notifications\EstadoVerificacionNotification;
 use App\Support\Auditoria;
 use Illuminate\Support\Facades\DB;
@@ -38,6 +40,70 @@ class VerificacionPrestadorController extends Controller
         return Inertia::render('Admin/Prestadores/Index', [
             'prestadores'  => $prestadores,
             'filtroEstado' => $estado,
+        ]);
+    }
+
+    /**
+     * Ficha del prestador para el administrador: lo necesario para decidir
+     * si aprueba o rechaza sin salir de la tabla a ciegas.
+     *
+     * Nunca se envía latitud/longitud: solo la ubicación aproximada en texto
+     * y el radio de cobertura (misma regla que en el perfil público).
+     */
+    public function show(PerfilPrestador $perfil): Response
+    {
+        $perfil->load([
+            'user:id,nombre,email',
+            'servicios' => fn ($query) => $query
+                ->select('id', 'perfil_prestador_id', 'categoria_id', 'titulo', 'precio_base', 'activo')
+                ->with('categoria:id,nombre')
+                ->orderBy('titulo'),
+        ]);
+
+        // Los pedidos y las reseñas cuelgan del servicio, no del perfil.
+        $idsServicios = $perfil->servicios()->select('id');
+
+        $conteoPedidos = Pedido::query()
+            ->whereIn('servicio_id', $idsServicios)
+            ->selectRaw('estado, COUNT(*) as total')
+            ->groupBy('estado')
+            ->pluck('total', 'estado');
+
+        // Todos los estados siempre presentes (en 0 si no hay), para que la vista no tenga que adivinar.
+        $pedidosPorEstado = collect(Pedido::ESTADOS)
+            ->mapWithKeys(fn (string $estado) => [$estado => (int) ($conteoPedidos[$estado] ?? 0)]);
+
+        $resenas = Resena::query()
+            ->whereIn('servicio_id', $idsServicios)
+            ->selectRaw('AVG(calificacion) as promedio, COUNT(*) as total')
+            ->first();
+
+        return Inertia::render('Admin/Prestadores/Perfil', [
+            'perfil' => [
+                'id'                   => $perfil->id,
+                'descripcion'          => $perfil->descripcion,
+                'ubicacion_aproximada' => $perfil->ubicacion_aproximada,
+                'radio_cobertura_km'   => $perfil->radio_cobertura_km,
+                'estado_verificacion'  => $perfil->estado_verificacion,
+                'created_at'           => $perfil->created_at,
+            ],
+            'usuario' => [
+                'nombre' => $perfil->user?->nombre,
+                'email'  => $perfil->user?->email,
+            ],
+            'servicios' => $perfil->servicios->map(fn ($servicio) => [
+                'id'          => $servicio->id,
+                'titulo'      => $servicio->titulo,
+                'precio_base' => $servicio->precio_base,
+                'activo'      => $servicio->activo,
+                'categoria'   => $servicio->categoria?->nombre,
+            ])->values(),
+            'pedidosPorEstado' => $pedidosPorEstado,
+            'totalPedidos'     => $pedidosPorEstado->sum(),
+            'resenas' => [
+                'promedio' => $resenas?->promedio !== null ? round((float) $resenas->promedio, 1) : null,
+                'total'    => (int) ($resenas?->total ?? 0),
+            ],
         ]);
     }
 
