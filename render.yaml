@@ -1,0 +1,41 @@
+databases:
+  - name: oficiosya-db
+    databaseName: oficiosya
+    user: oficiosya
+    plan: free
+
+services:
+  - type: web
+    name: oficiosya
+    runtime: docker
+    plan: free
+    healthCheckPath: /up
+    envVars:
+      - key: APP_NAME
+        value: OficiosYa
+      - key: APP_ENV
+        value: production
+      - key: APP_DEBUG
+        value: "false"
+      - key: APP_KEY
+        sync: false          # lo pegas en el panel (ver instrucciones)
+      - key: APP_URL
+        sync: false          # https://TU-SERVICIO.onrender.com
+      - key: LOG_CHANNEL
+        value: stderr
+      - key: DB_CONNECTION
+        value: pgsql
+      - key: DB_URL
+        fromDatabase:
+          name: oficiosya-db
+          property: connectionString
+      - key: SESSION_DRIVER
+        value: database
+      - key: CACHE_STORE
+        value: database
+      - key: QUEUE_CONNECTION
+        value: sync
+      - key: MAIL_MAILER
+        value: log
+      - key: ADMIN_SEED_PASSWORD
+        sync: false          # contrasena inicial de admin@oficiosya.com

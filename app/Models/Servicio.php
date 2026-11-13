@@ -64,7 +64,7 @@ class Servicio extends Model
             ->whereHas('perfilPrestador', fn ($q) => $q->cercanosA($lat, $lng, $km))
             ->addSelect([
                 'distancia_km' => PerfilPrestador::query()
-                    ->selectRaw('ROUND('.PerfilPrestador::SQL_DISTANCIA.', 1)', [$lat, $lng, $lat])
+                    ->selectRaw('ROUND(CAST('.PerfilPrestador::SQL_DISTANCIA.' AS DECIMAL(10,4)), 1)', [$lat, $lng, $lat])
                     ->whereColumn('perfiles_prestador.id', 'servicios.perfil_prestador_id')
                     ->limit(1),
             ])
