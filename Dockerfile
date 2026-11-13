@@ -41,5 +41,7 @@ RUN mkdir -p storage/framework/cache storage/framework/sessions \
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN sed -i 's/\r$//' /entrypoint.sh && chmod +x /entrypoint.sh
 
+RUN sed -i --follow-symlinks '/Alias \/icons\//d' /etc/apache2/mods-enabled/alias.conf
+
 EXPOSE 10000
 ENTRYPOINT ["/entrypoint.sh"]
