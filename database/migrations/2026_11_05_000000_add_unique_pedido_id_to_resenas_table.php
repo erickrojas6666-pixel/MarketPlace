@@ -18,9 +18,13 @@ return new class extends Migration
         // Si ya hay duplicados, se conserva la reseña más antigua de cada pedido;
         // de lo contrario el índice único fallaría.
         DB::statement(
-            'DELETE r1 FROM resenas r1
-             INNER JOIN resenas r2
-                ON r1.pedido_id = r2.pedido_id AND r1.id > r2.id'
+            'DELETE FROM resenas WHERE id IN (
+                SELECT id FROM (
+                    SELECT r1.id FROM resenas r1
+                    INNER JOIN resenas r2
+                    ON r1.pedido_id = r2.pedido_id AND r1.id > r2.id
+                ) AS duplicadas
+            )'
         );
 
         Schema::table('resenas', function (Blueprint $table) {
