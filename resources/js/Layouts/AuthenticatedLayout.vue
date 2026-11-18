@@ -5,6 +5,7 @@ import DropdownLink from '@/Components/DropdownLink.vue'
 import ResponsiveNavLink from '@/Components/ResponsiveNavLink.vue'
 import { Link, usePage } from '@inertiajs/vue3'
 import Toast from '@/Components/Toast.vue'
+import AvatarUsuario from '@/Components/AvatarUsuario.vue'
 
 const showingNavigationDropdown = ref(false)
 const page = usePage()
@@ -74,8 +75,13 @@ const claseEnlace = (activo) => [
                     <span class="inline-flex rounded-md">
                       <button
                         type="button"
-                        class="inline-flex items-center rounded-xl border border-white/20 bg-white/10 px-4 py-2 text-sm font-bold text-white transition duration-200 ease-in-out hover:bg-white/20 focus:outline-none"
+                        class="inline-flex items-center gap-2.5 rounded-xl border border-white/20 bg-white/10 px-3 py-1.5 text-sm font-bold text-white transition duration-200 ease-in-out hover:bg-white/20 focus:outline-none"
                       >
+                        <AvatarUsuario
+                          :nombre="$page.props.auth?.user?.nombre"
+                          :url="$page.props.auth?.user?.fotoUrl"
+                          clase="w-7 h-7 text-[10px]"
+                        />
                         {{ $page.props.auth?.user?.nombre || $page.props.auth?.user?.name }}
 
                         <svg
@@ -178,12 +184,19 @@ const claseEnlace = (activo) => [
           </div>
 
           <div class="border-t border-slate-200 pb-1 pt-4">
-            <div class="px-4">
+            <div class="px-4 flex items-center gap-3">
+              <AvatarUsuario
+                :nombre="$page.props.auth?.user?.nombre"
+                :url="$page.props.auth?.user?.fotoUrl"
+                clase="w-10 h-10 text-sm"
+              />
+              <div>
               <div class="text-base font-bold text-principal">
                 {{ $page.props.auth?.user?.nombre || $page.props.auth?.user?.name }}
               </div>
               <div class="text-sm font-medium text-gris-medio">
                 {{ $page.props.auth?.user?.email }}
+              </div>
               </div>
             </div>
 

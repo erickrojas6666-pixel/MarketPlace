@@ -20,6 +20,19 @@ return [
     // o 'mercadopago' (Checkout Pro; requiere MP_ACCESS_TOKEN).
     'pasarela' => env('MARKETPLACE_PASARELA', 'simulada'),
 
+    // Fotos (perfil, portafolio y evidencia de pedidos). Ver docs/FOTOS.md.
+    // En local: 'public' y 'local'. En producción: 'r2_publico' y 'r2_privado' (Cloudflare R2).
+    'fotos' => [
+        'disco_publico'            => env('FOTOS_DISCO_PUBLICO', 'public'),
+        'disco_privado'            => env('FOTOS_DISCO_PRIVADO', 'local'),
+        'max_kb'                   => (int) env('FOTOS_MAX_KB', 6144),
+        'lado_max'                 => 1600,   // px, imagen principal
+        'lado_miniatura'           => 400,    // px, miniatura
+        'max_por_servicio'         => 8,      // fotos de portafolio por servicio
+        'max_evidencias_por_parte' => 12,     // fotos de evidencia por pedido y por persona
+        'minutos_url_privada'      => 5,
+    ],
+
     // Interruptores de módulos (ver TransicionesPedido::mapa()).
     'cotizaciones_habilitadas' => (bool) env('MARKETPLACE_COTIZACIONES', false),
     'escrow_habilitado'        => (bool) env('MARKETPLACE_ESCROW', false),

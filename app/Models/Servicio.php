@@ -82,6 +82,12 @@ class Servicio extends Model
         return $this->hasMany(NivelesServicio::class, 'servicio_id');
     }
 
+    /** Portafolio: muestra de trabajos realizados (la primera es la portada). */
+    public function fotos(): HasMany
+    {
+        return $this->hasMany(FotoTrabajo::class, 'servicio_id')->orderBy('orden')->orderBy('id');
+    }
+
     public function categoria(): BelongsTo
     {
         return $this->belongsTo(Categoria::class);

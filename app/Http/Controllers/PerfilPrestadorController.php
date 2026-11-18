@@ -30,7 +30,7 @@ class PerfilPrestadorController extends Controller
         $categorias = Categoria::orderBy('nombre', 'asc')->get();
 
         // Obtener los servicios usando perfil_prestador_id
-        $serviciosPropios = Servicio::with('categoria')
+        $serviciosPropios = Servicio::with(['categoria', 'fotos'])
             ->where('perfil_prestador_id', $perfil->id)
             ->latest()
             ->get();
@@ -39,6 +39,7 @@ class PerfilPrestadorController extends Controller
             'perfil'           => $perfil,
             'categorias'       => $categorias,
             'serviciosPropios' => $serviciosPropios,
+            'maxFotosServicio' => (int) config('marketplace.fotos.max_por_servicio'),
         ]);
     }
 

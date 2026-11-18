@@ -3,6 +3,7 @@ import { ref, computed, onMounted, watch } from 'vue'
 import { Head, router, useForm, usePage } from '@inertiajs/vue3'
 import AuthenticatedLayout from '@/Layouts/AuthenticatedLayout.vue'
 import BuscadorUbicacion from '@/Components/BuscadorUbicacion.vue'
+import EvidenciaPedido from '@/Components/EvidenciaPedido.vue'
 import { useGeolocalizacion, redondear } from '@/composables/useGeolocalizacion'
 import { encolar, mostrarAviso } from '@/offline/sync'
 import { guardarDashboard } from '@/offline/snapshots'
@@ -633,6 +634,10 @@ const marcarNotificacionesLeidas = () => {
                 >
                   Finalizar trabajo
                 </button>
+                <EvidenciaPedido
+                  v-if="['en_progreso', 'completado', 'en_disputa', 'confirmado'].includes(p.estado)"
+                  :pedido-id="p.id"
+                />
               </div>
             </div>
           </div>
@@ -922,6 +927,11 @@ const marcarNotificacionesLeidas = () => {
                 >
                   Confirmar trabajo
                 </button>
+              </div>
+
+              <!-- Evidencia fotográfica (privada): cuando el trabajo ya empezó -->
+              <div v-if="['en_progreso', 'completado', 'en_disputa', 'confirmado'].includes(p.estado)" class="pt-3 border-t border-slate-200">
+                <EvidenciaPedido :pedido-id="p.id" />
               </div>
 
               <!-- Reseña: el backend solo acepta calificar pedidos confirmados -->

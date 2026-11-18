@@ -6,10 +6,14 @@ use App\Http\Controllers\Admin\VerificacionPrestadorController;
 use App\Http\Controllers\Api\UbicacionController;
 use App\Http\Controllers\CategoriaController;
 use App\Http\Controllers\DashboardController;
+use App\Http\Controllers\FotoEvidenciaController;
+use App\Http\Controllers\FotoPerfilController;
+use App\Http\Controllers\FotoTrabajoController;
 use App\Http\Controllers\PedidoController;
 use App\Http\Controllers\PagoRetornoController;
 use App\Http\Controllers\PagoWebController;
 use App\Http\Controllers\PerfilPrestadorController;
+use App\Http\Controllers\PrestadorPublicoController;
 use App\Http\Controllers\ProfileController;
 use App\Http\Controllers\PushController;
 use App\Http\Controllers\ResenaController;
@@ -34,6 +38,11 @@ Route::get('/', function () {
 
 // Catálogo público de servicios
 Route::get('/servicios', [ServicioController::class, 'index'])->name('servicios.index');
+
+// Perfil público del prestador (escaparate, RF-19): solo perfiles verificados.
+Route::get('/prestadores/{perfil}', [PrestadorPublicoController::class, 'show'])
+    ->whereNumber('perfil')
+    ->name('prestadores.show');
 
 // --------------------------------------------------------------------------
 // Dashboard Principal (Con Redirección Inteligente para Administradores)
@@ -83,6 +92,29 @@ Route::middleware('auth')->group(function () {
         ->middleware('throttle:20,1')
         ->name('api.ubicacion');
 
+    // Foto de perfil (cliente o prestador)
+    Route::post('/perfil/foto', [FotoPerfilController::class, 'store'])
+        ->middleware('throttle:10,1')
+        ->name('perfil.foto.store');
+    Route::delete('/perfil/foto', [FotoPerfilController::class, 'destroy'])
+        ->name('perfil.foto.destroy');
+
+    // Evidencia fotográfica del pedido (privada; lectura por URL firmada tras autorizar)
+    Route::get('/pedidos/{pedido}/evidencias', [FotoEvidenciaController::class, 'index'])
+        ->whereNumber('pedido')
+        ->name('evidencias.index');
+    Route::post('/pedidos/{pedido}/evidencias', [FotoEvidenciaController::class, 'store'])
+        ->whereNumber('pedido')
+        ->middleware('throttle:20,1')
+        ->name('evidencias.store');
+    Route::get('/evidencias/{foto}/{version?}', [FotoEvidenciaController::class, 'ver'])
+        ->whereNumber('foto')
+        ->where('version', 'original|miniatura')
+        ->name('evidencias.ver');
+    Route::delete('/evidencias/{foto}', [FotoEvidenciaController::class, 'destroy'])
+        ->whereNumber('foto')
+        ->name('evidencias.destroy');
+
     // Gestión de Pedidos y Estado
     Route::post('/pedidos', [PedidoController::class, 'store'])->name('pedidos.store');
     Route::patch('/pedidos/{pedido}/estado', [PedidoController::class, 'updateEstado'])->name('pedidos.updateEstado');
@@ -103,6 +135,18 @@ Route::middleware('auth')->group(function () {
 
         Route::post('/servicios', [ServicioController::class, 'store'])->name('servicios.store');
         Route::patch('/servicios/{servicio}/toggle', [ServicioController::class, 'toggleState'])->name('servicios.toggle');
+
+        // Portafolio: muestra de trabajos realizados de cada servicio
+        Route::post('/servicios/{servicio}/fotos', [FotoTrabajoController::class, 'store'])
+            ->whereNumber('servicio')
+            ->middleware('throttle:30,1')
+            ->name('servicios.fotos.store');
+        Route::patch('/fotos-trabajo/{foto}', [FotoTrabajoController::class, 'update'])
+            ->whereNumber('foto')
+            ->name('fotos-trabajo.update');
+        Route::delete('/fotos-trabajo/{foto}', [FotoTrabajoController::class, 'destroy'])
+            ->whereNumber('foto')
+            ->name('fotos-trabajo.destroy');
     });
 });
 
