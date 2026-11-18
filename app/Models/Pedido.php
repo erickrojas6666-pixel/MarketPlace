@@ -112,6 +112,12 @@ class Pedido extends Model
         return $this->hasOne(Resena::class);
     }
 
+    /** Evidencia fotográfica (antes / durante / después), en almacenamiento privado. */
+    public function evidencias(): HasMany
+    {
+        return $this->hasMany(FotoEvidencia::class, 'pedido_id');
+    }
+
     public function resenas(): HasMany
     {
         return $this->hasMany(Resena::class);

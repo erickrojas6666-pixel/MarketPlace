@@ -1,0 +1,2993 @@
+diff --git a/.env.example b/.env.example
+index 34fb6a2..bc36279 100644
+--- a/.env.example
++++ b/.env.example
+@@ -74,3 +74,15 @@ MARKETPLACE_DISPUTAS=false
+ VAPID_PUBLIC_KEY=
+ VAPID_PRIVATE_KEY=
+ VAPID_SUBJECT=mailto:tu-correo@ejemplo.com
++
++# --- Fotos (perfil, portafolio y evidencia). Ver docs/FOTOS.md ---
++# Local: deja estas dos así y ejecuta `php artisan storage:link`.
++# Producción: FOTOS_DISCO_PUBLICO=r2_publico y FOTOS_DISCO_PRIVADO=r2_privado.
++FOTOS_DISCO_PUBLICO=public
++FOTOS_DISCO_PRIVADO=local
++R2_ACCESS_KEY_ID=
++R2_SECRET_ACCESS_KEY=
++R2_ENDPOINT=
++R2_BUCKET_PUBLICO=
++R2_URL_PUBLICA=
++R2_BUCKET_PRIVADO=
+diff --git a/Dockerfile b/Dockerfile
+index 2e71592..97234d5 100644
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -17,7 +17,9 @@ FROM php:8.4-apache
+ 
+ RUN apt-get update && apt-get install -y --no-install-recommends \
+       libpq-dev libgmp-dev libzip-dev libicu-dev unzip \
+- && docker-php-ext-install pdo_pgsql pdo_mysql bcmath gmp intl zip opcache \
++      libjpeg-dev libpng-dev libwebp-dev \
++ && docker-php-ext-configure gd --with-jpeg --with-webp \
++ && docker-php-ext-install pdo_pgsql pdo_mysql bcmath gmp intl zip opcache gd exif \
+  && a2enmod rewrite headers \
+  && rm -rf /var/lib/apt/lists/*
+ 
+diff --git a/app/Http/Controllers/FotoEvidenciaController.php b/app/Http/Controllers/FotoEvidenciaController.php
+new file mode 100644
+index 0000000..693b82c
+--- /dev/null
++++ b/app/Http/Controllers/FotoEvidenciaController.php
+@@ -0,0 +1,149 @@
++<?php
++
++namespace App\Http\Controllers;
++
++use App\Models\FotoEvidencia;
++use App\Models\Pedido;
++use App\Policies\PedidoPolicy;
++use App\Services\AlmacenFotos;
++use App\Support\Auditoria;
++use Illuminate\Http\JsonResponse;
++use Illuminate\Http\RedirectResponse;
++use Illuminate\Http\Request;
++use Illuminate\Http\Response;
++use Illuminate\Support\Facades\DB;
++use Illuminate\Support\Facades\Gate;
++use Illuminate\Validation\ValidationException;
++
++/**
++ * Evidencia fotográfica de un pedido (antes / durante / después).
++ *
++ * Son fotos del interior de un domicilio: disco privado, nada de URLs públicas.
++ * Cada lectura se autoriza y termina en una URL firmada de pocos minutos.
++ */
++class FotoEvidenciaController extends Controller
++{
++    /** Lista para el panel del pedido (JSON: lo consume el componente EvidenciaPedido). */
++    public function index(Request $request, Pedido $pedido): JsonResponse
++    {
++        Gate::authorize('verEvidencias', $pedido);
++
++        $user = $request->user();
++
++        $fotos = $pedido->evidencias()->oldest()->get()->map(fn (FotoEvidencia $f) => [
++            'id'             => $f->id,
++            'fase'           => $f->fase,
++            'pie'            => $f->pie,
++            'autor'          => $f->subida_por === $pedido->cliente_id ? 'cliente' : 'prestador',
++            'mia'            => $f->subida_por === $user->id,
++            'puede_eliminar' => Gate::forUser($user)->allows('eliminar', $f),
++            'url'            => route('evidencias.ver', ['foto' => $f->id]),
++            'url_miniatura'  => route('evidencias.ver', ['foto' => $f->id, 'version' => 'miniatura']),
++            'created_at'     => $f->created_at,
++        ]);
++
++        return response()->json([
++            'puede_subir' => Gate::forUser($user)->allows('subirEvidencia', $pedido),
++            'maximo'      => (int) config('marketplace.fotos.max_evidencias_por_parte'),
++            'fotos'       => $fotos,
++        ]);
++    }
++
++    public function store(Request $request, Pedido $pedido, AlmacenFotos $almacen): JsonResponse
++    {
++        Gate::authorize('subirEvidencia', $pedido);
++
++        $request->validate([
++            'foto' => ['required', 'file', 'mimes:jpg,jpeg,png,webp', 'max:'.config('marketplace.fotos.max_kb')],
++            'fase' => ['required', 'string', 'in:'.implode(',', FotoEvidencia::FASES)],
++            'pie'  => ['nullable', 'string', 'max:160'],
++        ]);
++
++        $user = $request->user();
++        $max  = (int) config('marketplace.fotos.max_evidencias_por_parte');
++
++        $subidas = $pedido->evidencias()->where('subida_por', $user->id)->count();
++
++        if ($subidas >= $max) {
++            throw ValidationException::withMessages([
++                'foto' => "Alcanzaste el máximo de {$max} fotos de evidencia para este pedido.",
++            ]);
++        }
++
++        $datos = $almacen->guardar(
++            $request->file('foto'),
++            $almacen->discoPrivado(),
++            "evidencia/{$pedido->id}",
++        );
++
++        try {
++            $foto = DB::transaction(function () use ($pedido, $user, $datos, $request) {
++                $foto = FotoEvidencia::create([
++                    'pedido_id'   => $pedido->id,
++                    'subida_por'  => $user->id,
++                    'fase'        => $request->input('fase'),
++                    'ruta'        => $datos['ruta'],
++                    'hash_sha256' => $datos['hash_sha256'],
++                    'pie'         => $request->input('pie') ?: null,
++                ]);
++
++                // RF-52. Nunca se registra la ruta ni el contenido: solo qué pasó y dónde.
++                Auditoria::registrar('evidencia.subida', 'pedido', $pedido->id, null, [
++                    'foto_id' => $foto->id,
++                    'fase'    => $foto->fase,
++                ]);
++
++                return $foto;
++            });
++        } catch (\Throwable $e) {
++            // Si no quedó registrada en BD, tampoco debe quedar el archivo huérfano.
++            $almacen->borrar($almacen->discoPrivado(), $datos['ruta']);
++
++            throw $e;
++        }
++
++        return response()->json(['id' => $foto->id], 201);
++    }
++
++    /** Autoriza y redirige a la URL firmada de la imagen (original o miniatura). */
++    public function ver(Request $request, AlmacenFotos $almacen, FotoEvidencia $foto, string $version = 'original'): RedirectResponse
++    {
++        Gate::authorize('ver', $foto);
++
++        $user   = $request->user();
++        $pedido = $foto->pedido;
++
++        // Quien no es parte del pedido (mediador) deja rastro de cada consulta.
++        if (! PedidoPolicy::esCliente($user, $pedido) && ! PedidoPolicy::esPrestador($user, $pedido)) {
++            Auditoria::registrar('evidencia.consultada', 'pedido', $pedido->id, null, ['foto_id' => $foto->id]);
++        }
++
++        $ruta = $foto->getAttributes()['ruta'];
++
++        if ($version === 'miniatura') {
++            $ruta = AlmacenFotos::miniaturaDe($ruta);
++        }
++
++        return redirect()->away($almacen->urlTemporal($ruta))
++            ->header('Cache-Control', 'private, no-store');
++    }
++
++    public function destroy(FotoEvidencia $foto, AlmacenFotos $almacen): Response
++    {
++        Gate::authorize('eliminar', $foto);
++
++        $ruta = $foto->getAttributes()['ruta'];
++
++        DB::transaction(function () use ($foto) {
++            Auditoria::registrar('evidencia.eliminada', 'pedido', $foto->pedido_id, null, [
++                'foto_id' => $foto->id,
++            ]);
++
++            $foto->delete();
++        });
++
++        $almacen->borrar($almacen->discoPrivado(), $ruta);
++
++        return response()->noContent();
++    }
++}
+diff --git a/app/Http/Controllers/FotoPerfilController.php b/app/Http/Controllers/FotoPerfilController.php
+new file mode 100644
+index 0000000..f820a0a
+--- /dev/null
++++ b/app/Http/Controllers/FotoPerfilController.php
+@@ -0,0 +1,47 @@
++<?php
++
++namespace App\Http\Controllers;
++
++use App\Services\AlmacenFotos;
++use Illuminate\Http\RedirectResponse;
++use Illuminate\Http\Request;
++
++/** Foto de perfil del usuario (cliente o prestador). RF-03. */
++class FotoPerfilController extends Controller
++{
++    public function store(Request $request, AlmacenFotos $almacen): RedirectResponse
++    {
++        $request->validate([
++            'foto' => ['required', 'file', 'mimes:jpg,jpeg,png,webp', 'max:'.config('marketplace.fotos.max_kb')],
++        ]);
++
++        $user = $request->user();
++
++        $nueva = $almacen->guardar(
++            $request->file('foto'),
++            $almacen->discoPublico(),
++            "perfiles/{$user->id}",
++        );
++
++        $anterior = $user->getAttributes()['foto_path'] ?? null;
++
++        $user->forceFill(['foto_path' => $nueva['ruta']])->save();
++
++        // Se borra la anterior después de guardar la nueva: nunca se queda sin foto por un fallo.
++        $almacen->borrar($almacen->discoPublico(), $anterior);
++
++        return redirect()->back()->with('success', 'Foto de perfil actualizada.');
++    }
++
++    public function destroy(Request $request, AlmacenFotos $almacen): RedirectResponse
++    {
++        $user     = $request->user();
++        $anterior = $user->getAttributes()['foto_path'] ?? null;
++
++        $user->forceFill(['foto_path' => null])->save();
++
++        $almacen->borrar($almacen->discoPublico(), $anterior);
++
++        return redirect()->back()->with('success', 'Foto de perfil eliminada.');
++    }
++}
+diff --git a/app/Http/Controllers/FotoTrabajoController.php b/app/Http/Controllers/FotoTrabajoController.php
+new file mode 100644
+index 0000000..b63df61
+--- /dev/null
++++ b/app/Http/Controllers/FotoTrabajoController.php
+@@ -0,0 +1,91 @@
++<?php
++
++namespace App\Http\Controllers;
++
++use App\Models\FotoTrabajo;
++use App\Models\Servicio;
++use App\Services\AlmacenFotos;
++use Illuminate\Http\RedirectResponse;
++use Illuminate\Http\Request;
++use Illuminate\Support\Facades\DB;
++use Illuminate\Support\Facades\Gate;
++use Illuminate\Validation\ValidationException;
++
++/** Portafolio público de un servicio: muestra de trabajos realizados (RF-10, RF-19). */
++class FotoTrabajoController extends Controller
++{
++    public function store(Request $request, Servicio $servicio, AlmacenFotos $almacen): RedirectResponse
++    {
++        Gate::authorize('gestionarFotos', $servicio);
++
++        $request->validate([
++            'foto' => ['required', 'file', 'mimes:jpg,jpeg,png,webp', 'max:'.config('marketplace.fotos.max_kb')],
++            'pie'  => ['nullable', 'string', 'max:160'],
++        ]);
++
++        $max = (int) config('marketplace.fotos.max_por_servicio');
++
++        if ($servicio->fotos()->count() >= $max) {
++            throw ValidationException::withMessages([
++                'foto' => "Cada servicio admite hasta {$max} fotos. Elimina alguna para subir otra.",
++            ]);
++        }
++
++        $datos = $almacen->guardar(
++            $request->file('foto'),
++            $almacen->discoPublico(),
++            "portafolio/{$servicio->id}",
++        );
++
++        FotoTrabajo::create([
++            'servicio_id' => $servicio->id,
++            'ruta'        => $datos['ruta'],
++            'hash_sha256' => $datos['hash_sha256'],
++            'pie'         => $request->input('pie') ?: null,
++            'orden'       => (int) $servicio->fotos()->max('orden') + 1,
++        ]);
++
++        return redirect()->back()->with('success', 'Foto agregada a tu portafolio.');
++    }
++
++    /** Cambia el pie de foto o la marca como portada (primera del portafolio). */
++    public function update(Request $request, FotoTrabajo $foto): RedirectResponse
++    {
++        $servicio = $foto->servicio;
++        Gate::authorize('gestionarFotos', $servicio);
++
++        $validated = $request->validate([
++            'pie'     => ['nullable', 'string', 'max:160'],
++            'portada' => ['nullable', 'boolean'],
++        ]);
++
++        DB::transaction(function () use ($foto, $servicio, $validated) {
++            if (array_key_exists('pie', $validated)) {
++                $foto->update(['pie' => $validated['pie'] ?: null]);
++            }
++
++            if (! empty($validated['portada'])) {
++                // Renumera: la elegida primero y el resto en su orden actual.
++                $ids = $servicio->fotos()->pluck('id')->reject(fn ($id) => $id === $foto->id)->values();
++                $ids->prepend($foto->id)->each(
++                    fn ($id, $posicion) => FotoTrabajo::whereKey($id)->update(['orden' => $posicion])
++                );
++            }
++        });
++
++        return redirect()->back()->with('success', 'Foto actualizada.');
++    }
++
++    public function destroy(FotoTrabajo $foto, AlmacenFotos $almacen): RedirectResponse
++    {
++        Gate::authorize('gestionarFotos', $foto->servicio);
++
++        $ruta = $foto->getAttributes()['ruta'];
++
++        $foto->delete();
++
++        $almacen->borrar($almacen->discoPublico(), $ruta);
++
++        return redirect()->back()->with('success', 'Foto eliminada.');
++    }
++}
+diff --git a/app/Http/Controllers/PerfilPrestadorController.php b/app/Http/Controllers/PerfilPrestadorController.php
+index b1b65a7..6dbfddc 100644
+--- a/app/Http/Controllers/PerfilPrestadorController.php
++++ b/app/Http/Controllers/PerfilPrestadorController.php
+@@ -30,7 +30,7 @@ public function edit(): Response
+         $categorias = Categoria::orderBy('nombre', 'asc')->get();
+ 
+         // Obtener los servicios usando perfil_prestador_id
+-        $serviciosPropios = Servicio::with('categoria')
++        $serviciosPropios = Servicio::with(['categoria', 'fotos'])
+             ->where('perfil_prestador_id', $perfil->id)
+             ->latest()
+             ->get();
+@@ -39,6 +39,7 @@ public function edit(): Response
+             'perfil'           => $perfil,
+             'categorias'       => $categorias,
+             'serviciosPropios' => $serviciosPropios,
++            'maxFotosServicio' => (int) config('marketplace.fotos.max_por_servicio'),
+         ]);
+     }
+ 
+diff --git a/app/Http/Controllers/PrestadorPublicoController.php b/app/Http/Controllers/PrestadorPublicoController.php
+new file mode 100644
+index 0000000..1ce3911
+--- /dev/null
++++ b/app/Http/Controllers/PrestadorPublicoController.php
+@@ -0,0 +1,116 @@
++<?php
++
++namespace App\Http\Controllers;
++
++use App\Models\FotoTrabajo;
++use App\Models\Pedido;
++use App\Models\PerfilPrestador;
++use App\Models\Resena;
++use Illuminate\Support\Str;
++use Inertia\Inertia;
++use Inertia\Response;
++
++/**
++ * Perfil público del prestador, "escaparate" (RF-19): servicios, portafolio,
++ * reseñas y verificación. Solo perfiles verificados; nunca coordenadas ni correo.
++ */
++class PrestadorPublicoController extends Controller
++{
++    private const MAX_GALERIA = 24;
++    private const MAX_RESENAS = 10;
++
++    public function show(PerfilPrestador $perfil): Response
++    {
++        abort_unless($perfil->estaVerificado(), 404);
++
++        $perfil->load('user:id,nombre,foto_path');
++
++        $servicios = $perfil->servicios()
++            ->activos()
++            ->with(['categoria:id,nombre', 'fotos'])
++            ->orderBy('titulo')
++            ->get();
++
++        // Pedidos y reseñas cuelgan del servicio, no del perfil (incluye servicios hoy pausados).
++        $idsServicios = $perfil->servicios()->select('id');
++
++        $resumen = Resena::query()
++            ->whereIn('servicio_id', $idsServicios)
++            ->selectRaw('AVG(calificacion) as promedio, COUNT(*) as total')
++            ->first();
++
++        $resenas = Resena::query()
++            ->whereIn('servicio_id', $idsServicios)
++            ->with('cliente:id,nombre')
++            ->latest()
++            ->limit(self::MAX_RESENAS)
++            ->get()
++            ->map(fn (Resena $r) => [
++                'id'           => $r->id,
++                'calificacion' => $r->calificacion,
++                'comentario'   => $r->comentario,
++                'autor'        => $this->nombreAbreviado($r->cliente?->nombre),
++                'fecha'        => $r->created_at?->toDateString(),
++            ]);
++
++        $galeria = FotoTrabajo::query()
++            ->whereIn('servicio_id', $servicios->pluck('id'))
++            ->with('servicio:id,titulo')
++            ->orderBy('orden')
++            ->orderByDesc('id')
++            ->limit(self::MAX_GALERIA)
++            ->get()
++            ->map(fn (FotoTrabajo $f) => [
++                'id'            => $f->id,
++                'url'           => $f->url,
++                'url_miniatura' => $f->url_miniatura,
++                'pie'           => $f->pie,
++                'servicio'      => $f->servicio?->titulo,
++            ]);
++
++        return Inertia::render('Prestadores/Show', [
++            'prestador' => [
++                'id'                   => $perfil->id,
++                'nombre'               => $perfil->user?->nombre,
++                'foto_url'             => $perfil->user?->foto_url,
++                'descripcion'          => $perfil->descripcion,
++                'ubicacion_aproximada' => $perfil->ubicacion_aproximada,
++                'radio_cobertura_km'   => $perfil->radio_cobertura_km,
++                'es_pro'               => (bool) $perfil->es_pro,
++                'miembro_desde'        => $perfil->created_at?->toDateString(),
++            ],
++            'servicios' => $servicios->map(fn ($s) => [
++                'id'          => $s->id,
++                'titulo'      => $s->titulo,
++                'descripcion' => $s->descripcion,
++                'precio_base' => $s->precio_base !== null ? (float) $s->precio_base : null,
++                'categoria'   => $s->categoria?->nombre,
++                'portada'     => $s->fotos->first()?->url_miniatura,
++            ])->values(),
++            'galeria'  => $galeria,
++            'resumen'  => [
++                'promedio'           => $resumen?->promedio !== null ? round((float) $resumen->promedio, 1) : null,
++                'total_resenas'      => (int) ($resumen?->total ?? 0),
++                'trabajos_confirmados' => Pedido::query()
++                    ->whereIn('servicio_id', $idsServicios)
++                    ->where('estado', Pedido::CONFIRMADO)
++                    ->count(),
++            ],
++            'resenas' => $resenas,
++        ]);
++    }
++
++    /** "María López Pérez" → "María L." (las reseñas son públicas: no se publica el nombre completo). */
++    private function nombreAbreviado(?string $nombre): string
++    {
++        $partes = preg_split('/\s+/', trim((string) $nombre)) ?: [];
++
++        if ($partes === [] || $partes[0] === '') {
++            return 'Cliente';
++        }
++
++        $inicial = isset($partes[1]) ? ' '.Str::upper(Str::substr($partes[1], 0, 1)).'.' : '';
++
++        return $partes[0].$inicial;
++    }
++}
+diff --git a/app/Http/Controllers/ProfileController.php b/app/Http/Controllers/ProfileController.php
+index 873b4f7..fd61bc7 100644
+--- a/app/Http/Controllers/ProfileController.php
++++ b/app/Http/Controllers/ProfileController.php
+@@ -3,6 +3,8 @@
+ namespace App\Http\Controllers;
+ 
+ use App\Http\Requests\ProfileUpdateRequest;
++use App\Models\FotoTrabajo;
++use App\Services\AlmacenFotos;
+ use Illuminate\Contracts\Auth\MustVerifyEmail;
+ use Illuminate\Http\RedirectResponse;
+ use Illuminate\Http\Request;
+@@ -51,10 +53,26 @@ public function destroy(Request $request): RedirectResponse
+ 
+         $user = $request->user();
+ 
++        // Los archivos públicos no se borran con la fila (la BD solo elimina en cascada
++        // los registros): se limpian aquí. La evidencia de pedidos se conserva a propósito.
++        $almacen = app(AlmacenFotos::class);
++        $rutas   = FotoTrabajo::query()
++            ->whereIn('servicio_id', fn ($q) => $q->select('servicios.id')
++                ->from('servicios')
++                ->join('perfiles_prestador', 'perfiles_prestador.id', '=', 'servicios.perfil_prestador_id')
++                ->where('perfiles_prestador.user_id', $user->id))
++            ->get()
++            ->map(fn (FotoTrabajo $f) => $f->getAttributes()['ruta'])
++            ->all();
++
++        $rutas[] = $user->getAttributes()['foto_path'] ?? null;
++
+         Auth::logout();
+ 
+         $user->delete();
+ 
++        $almacen->borrar($almacen->discoPublico(), $rutas);
++
+         $request->session()->invalidate();
+         $request->session()->regenerateToken();
+ 
+diff --git a/app/Http/Controllers/ServicioController.php b/app/Http/Controllers/ServicioController.php
+index 94b408d..15842e1 100644
+--- a/app/Http/Controllers/ServicioController.php
++++ b/app/Http/Controllers/ServicioController.php
+@@ -44,7 +44,8 @@ public function index(Request $request): Response
+             ->with([
+                 'categoria:id,nombre',
+                 'perfilPrestador:id,user_id',
+-                'perfilPrestador.user:id,nombre',
++                'perfilPrestador.user:id,nombre,foto_path',
++                'fotos',
+             ])
+             ->activos()
+             ->whereHas(
+diff --git a/app/Http/Middleware/HandleInertiaRequests.php b/app/Http/Middleware/HandleInertiaRequests.php
+index aa56f30..3d75ea9 100644
+--- a/app/Http/Middleware/HandleInertiaRequests.php
++++ b/app/Http/Middleware/HandleInertiaRequests.php
+@@ -29,6 +29,7 @@ public function share(Request $request): array
+                     'id'          => $user->id,
+                     'nombre'      => $user->nombre,
+                     'email'       => $user->email,
++                    'fotoUrl'     => $user->foto_url,
+                     'roles'       => $user->getRoleNames(),
+                     'esPrestador' => $user->hasRole('prestador'),
+                     'esCliente'   => $user->hasRole('cliente'),
+diff --git a/app/Http/Requests/ProfileUpdateRequest.php b/app/Http/Requests/ProfileUpdateRequest.php
+index e2202dd..2534927 100644
+--- a/app/Http/Requests/ProfileUpdateRequest.php
++++ b/app/Http/Requests/ProfileUpdateRequest.php
+@@ -17,7 +17,7 @@ class ProfileUpdateRequest extends FormRequest
+     public function rules(): array
+     {
+         return [
+-            'name' => ['required', 'string', 'max:255'],
++            'nombre' => ['required', 'string', 'max:255'],
+             'email' => [
+                 'required',
+                 'string',
+diff --git a/app/Http/Resources/ServicioResource.php b/app/Http/Resources/ServicioResource.php
+index 27a3886..f49a864 100644
+--- a/app/Http/Resources/ServicioResource.php
++++ b/app/Http/Resources/ServicioResource.php
+@@ -25,6 +25,11 @@ public function toArray(Request $request): array
+             'prestador' => [
+                 'nombre' => $this->perfilPrestador?->user?->nombre,
+             ],
++            'fotos' => $this->whenLoaded('fotos', fn () => $this->fotos->map(fn ($f) => [
++                'url'           => $f->url,
++                'url_miniatura' => $f->url_miniatura,
++                'pie'           => $f->pie,
++            ])->values()),
+             'calificacion_promedio' => $promedio !== null ? round((float) $promedio, 1) : null,
+             'resenas_count'         => (int) ($this->resource->getAttribute('resenas_count') ?? 0),
+             'niveles'               => $this->whenLoaded('niveles', fn () => $this->niveles->map(fn ($n) => [
+diff --git a/app/Models/FotoEvidencia.php b/app/Models/FotoEvidencia.php
+new file mode 100644
+index 0000000..939187d
+--- /dev/null
++++ b/app/Models/FotoEvidencia.php
+@@ -0,0 +1,51 @@
++<?php
++
++namespace App\Models;
++
++use Illuminate\Database\Eloquent\Model;
++use Illuminate\Database\Eloquent\Relations\BelongsTo;
++
++/**
++ * Evidencia fotográfica de un pedido. Privada: nunca se expone la ruta; el acceso
++ * pasa por la ruta autenticada evidencias.ver, que redirige a una URL firmada de pocos minutos.
++ *
++ * @property int $id
++ * @property int $pedido_id
++ * @property int|null $subida_por
++ * @property string $fase  antes | durante | despues
++ * @property string $ruta
++ * @property string $hash_sha256
++ * @property string|null $pie
++ */
++class FotoEvidencia extends Model
++{
++    public const FASES = ['antes', 'durante', 'despues'];
++
++    protected $table = 'fotos_evidencia';
++
++    protected $fillable = [
++        'pedido_id',
++        'subida_por',
++        'fase',
++        'ruta',
++        'hash_sha256',
++        'pie',
++    ];
++
++    protected $hidden = ['ruta', 'hash_sha256'];
++
++    protected $casts = [
++        'pedido_id'  => 'integer',
++        'subida_por' => 'integer',
++    ];
++
++    public function pedido(): BelongsTo
++    {
++        return $this->belongsTo(Pedido::class, 'pedido_id');
++    }
++
++    public function autor(): BelongsTo
++    {
++        return $this->belongsTo(User::class, 'subida_por');
++    }
++}
+diff --git a/app/Models/FotoTrabajo.php b/app/Models/FotoTrabajo.php
+new file mode 100644
+index 0000000..2a7d845
+--- /dev/null
++++ b/app/Models/FotoTrabajo.php
+@@ -0,0 +1,63 @@
++<?php
++
++namespace App\Models;
++
++use App\Services\AlmacenFotos;
++use Illuminate\Database\Eloquent\Casts\Attribute;
++use Illuminate\Database\Eloquent\Model;
++use Illuminate\Database\Eloquent\Relations\BelongsTo;
++
++/**
++ * Foto del portafolio de un servicio (pública).
++ *
++ * @property int $id
++ * @property int $servicio_id
++ * @property string $ruta
++ * @property string $hash_sha256
++ * @property string|null $pie
++ * @property int $orden
++ * @property-read string|null $url
++ * @property-read string|null $url_miniatura
++ */
++class FotoTrabajo extends Model
++{
++    protected $table = 'fotos_trabajo';
++
++    protected $fillable = [
++        'servicio_id',
++        'ruta',
++        'hash_sha256',
++        'pie',
++        'orden',
++    ];
++
++    protected $hidden = ['ruta', 'hash_sha256'];
++
++    protected $appends = ['url', 'url_miniatura'];
++
++    protected $casts = [
++        'servicio_id' => 'integer',
++        'orden'       => 'integer',
++    ];
++
++    protected function url(): Attribute
++    {
++        return Attribute::get(
++            fn () => app(AlmacenFotos::class)->urlPublica($this->attributes['ruta'] ?? null)
++        );
++    }
++
++    protected function urlMiniatura(): Attribute
++    {
++        return Attribute::get(function () {
++            $ruta = $this->attributes['ruta'] ?? null;
++
++            return $ruta ? app(AlmacenFotos::class)->urlPublica(AlmacenFotos::miniaturaDe($ruta)) : null;
++        });
++    }
++
++    public function servicio(): BelongsTo
++    {
++        return $this->belongsTo(Servicio::class, 'servicio_id');
++    }
++}
+diff --git a/app/Models/Pedido.php b/app/Models/Pedido.php
+index d458404..36f769e 100644
+--- a/app/Models/Pedido.php
++++ b/app/Models/Pedido.php
+@@ -112,6 +112,12 @@ public function resena(): HasOne
+         return $this->hasOne(Resena::class);
+     }
+ 
++    /** Evidencia fotográfica (antes / durante / después), en almacenamiento privado. */
++    public function evidencias(): HasMany
++    {
++        return $this->hasMany(FotoEvidencia::class, 'pedido_id');
++    }
++
+     public function resenas(): HasMany
+     {
+         return $this->hasMany(Resena::class);
+diff --git a/app/Models/Servicio.php b/app/Models/Servicio.php
+index f399833..c11006b 100644
+--- a/app/Models/Servicio.php
++++ b/app/Models/Servicio.php
+@@ -82,6 +82,12 @@ public function niveles(): HasMany
+         return $this->hasMany(NivelesServicio::class, 'servicio_id');
+     }
+ 
++    /** Portafolio: muestra de trabajos realizados (la primera es la portada). */
++    public function fotos(): HasMany
++    {
++        return $this->hasMany(FotoTrabajo::class, 'servicio_id')->orderBy('orden')->orderBy('id');
++    }
++
+     public function categoria(): BelongsTo
+     {
+         return $this->belongsTo(Categoria::class);
+diff --git a/app/Models/User.php b/app/Models/User.php
+index 9670f3c..13a067a 100644
+--- a/app/Models/User.php
++++ b/app/Models/User.php
+@@ -2,7 +2,9 @@
+ 
+ namespace App\Models;
+ 
++use App\Services\AlmacenFotos;
+ use Carbon\Carbon;
++use Illuminate\Database\Eloquent\Casts\Attribute;
+ use Illuminate\Database\Eloquent\Collection;
+ use Illuminate\Database\Eloquent\Factories\HasFactory;
+ use Illuminate\Database\Eloquent\Relations\HasMany;
+@@ -63,8 +65,12 @@ class User extends Authenticatable
+         'remember_token',
+         'google_id',
+         'two_factor_code',
++        'foto_path', // la ruta no viaja; el frontend recibe foto_url
+     ];
+ 
++    /** URL pública de la miniatura de perfil (null si no hay foto). */
++    protected $appends = ['foto_url'];
++
+     protected function casts(): array
+     {
+         return [
+@@ -72,6 +78,19 @@ protected function casts(): array
+         ];
+     }
+ 
++    /**
++     * Miniatura (400 px) de la foto de perfil. Se lee de $attributes para no fallar
++     * cuando la consulta no seleccionó la columna (p. ej. 'cliente:id,nombre').
++     */
++    protected function fotoUrl(): Attribute
++    {
++        return Attribute::get(function () {
++            $ruta = $this->attributes['foto_path'] ?? null;
++
++            return $ruta ? app(AlmacenFotos::class)->urlPublica(AlmacenFotos::miniaturaDe($ruta)) : null;
++        });
++    }
++
+     /* -----------------------------------------------------------------
+      | Atajos de rol (evitan repetir cadenas de roles en controladores)
+      |-----------------------------------------------------------------*/
+diff --git a/app/Policies/FotoEvidenciaPolicy.php b/app/Policies/FotoEvidenciaPolicy.php
+new file mode 100644
+index 0000000..e3eb59e
+--- /dev/null
++++ b/app/Policies/FotoEvidenciaPolicy.php
+@@ -0,0 +1,25 @@
++<?php
++
++namespace App\Policies;
++
++use App\Models\FotoEvidencia;
++use App\Models\Pedido;
++use App\Models\User;
++
++class FotoEvidenciaPolicy
++{
++    public function ver(User $user, FotoEvidencia $foto): bool
++    {
++        return $user->can('verEvidencias', $foto->pedido);
++    }
++
++    /**
++     * Solo quien la subió y solo mientras el trabajo no está cerrado ni en disputa:
++     * la evidencia no puede desaparecer cuando alguien la necesita.
++     */
++    public function eliminar(User $user, FotoEvidencia $foto): bool
++    {
++        return $foto->subida_por === $user->id
++            && in_array($foto->pedido->estado, [Pedido::EN_PROGRESO, Pedido::COMPLETADO], true);
++    }
++}
+diff --git a/app/Policies/PedidoPolicy.php b/app/Policies/PedidoPolicy.php
+new file mode 100644
+index 0000000..578952d
+--- /dev/null
++++ b/app/Policies/PedidoPolicy.php
+@@ -0,0 +1,51 @@
++<?php
++
++namespace App\Policies;
++
++use App\Models\Pedido;
++use App\Models\User;
++
++/** Quién ve y quién sube la evidencia fotográfica de un pedido. */
++class PedidoPolicy
++{
++    /** Estados en los que cada parte puede aportar evidencia. */
++    private const SUBE_PRESTADOR = [Pedido::EN_PROGRESO, Pedido::COMPLETADO];
++    private const SUBE_CLIENTE   = [Pedido::COMPLETADO, Pedido::EN_DISPUTA];
++
++    public static function esCliente(User $user, Pedido $pedido): bool
++    {
++        return $pedido->cliente_id === $user->id;
++    }
++
++    public static function esPrestador(User $user, Pedido $pedido): bool
++    {
++        $pedido->loadMissing('servicio.perfilPrestador');
++
++        $prestadorUserId = $pedido->servicio?->perfilPrestador?->user_id;
++
++        return $prestadorUserId !== null && $prestadorUserId === $user->id;
++    }
++
++    /**
++     * Las dos partes siempre. El mediador (o superadmin) solo mientras el pedido está
++     * en disputa, y solo si no es parte del pedido (mínimo privilegio, RF-49).
++     */
++    public function verEvidencias(User $user, Pedido $pedido): bool
++    {
++        if (self::esCliente($user, $pedido) || self::esPrestador($user, $pedido)) {
++            return true;
++        }
++
++        return $pedido->estado === Pedido::EN_DISPUTA
++            && $user->hasAnyRole(['mediador', 'superadmin']);
++    }
++
++    public function subirEvidencia(User $user, Pedido $pedido): bool
++    {
++        if (self::esPrestador($user, $pedido) && in_array($pedido->estado, self::SUBE_PRESTADOR, true)) {
++            return true;
++        }
++
++        return self::esCliente($user, $pedido) && in_array($pedido->estado, self::SUBE_CLIENTE, true);
++    }
++}
+diff --git a/app/Policies/ServicioPolicy.php b/app/Policies/ServicioPolicy.php
+new file mode 100644
+index 0000000..0eccdf8
+--- /dev/null
++++ b/app/Policies/ServicioPolicy.php
+@@ -0,0 +1,18 @@
++<?php
++
++namespace App\Policies;
++
++use App\Models\Servicio;
++use App\Models\User;
++
++class ServicioPolicy
++{
++    /** Gestionar el portafolio: dueño del servicio y prestador verificado (RF-08). */
++    public function gestionarFotos(User $user, Servicio $servicio): bool
++    {
++        $servicio->loadMissing('perfilPrestador');
++
++        return $user->esPrestadorVerificado()
++            && $servicio->perfilPrestador?->user_id === $user->id;
++    }
++}
+diff --git a/app/Services/AlmacenFotos.php b/app/Services/AlmacenFotos.php
+new file mode 100644
+index 0000000..0d676aa
+--- /dev/null
++++ b/app/Services/AlmacenFotos.php
+@@ -0,0 +1,115 @@
++<?php
++
++namespace App\Services;
++
++use App\Support\Imagenes\ProcesadorImagen;
++use Illuminate\Http\UploadedFile;
++use Illuminate\Support\Facades\Storage;
++use Illuminate\Support\Str;
++use Illuminate\Validation\ValidationException;
++use InvalidArgumentException;
++use Throwable;
++
++/**
++ * Único punto por el que entran fotos al sistema.
++ *
++ * Dos discos (config/marketplace.php → fotos):
++ *  - público: foto de perfil y portafolio (URL pública; en producción, bucket público de R2).
++ *  - privado: evidencia de pedidos (solo URL temporal firmada; bucket privado de R2).
++ *
++ * Nombres aleatorios (ULID): nada del nombre original del archivo llega al almacenamiento.
++ */
++class AlmacenFotos
++{
++    public function __construct(private readonly ProcesadorImagen $procesador) {}
++
++    public function discoPublico(): string
++    {
++        return (string) config('marketplace.fotos.disco_publico');
++    }
++
++    public function discoPrivado(): string
++    {
++        return (string) config('marketplace.fotos.disco_privado');
++    }
++
++    /** Convención: la miniatura vive junto a la imagen principal con sufijo _m. */
++    public static function miniaturaDe(string $ruta): string
++    {
++        return preg_replace('/\.webp$/', '_m.webp', $ruta) ?? $ruta;
++    }
++
++    /**
++     * Procesa y guarda la imagen y su miniatura.
++     *
++     * @return array{ruta: string, hash_sha256: string}
++     *
++     * @throws ValidationException con el error en el campo "foto"
++     */
++    public function guardar(UploadedFile $archivo, string $disco, string $carpeta): array
++    {
++        try {
++            $imagen = $this->procesador->procesar(
++                $archivo,
++                (int) config('marketplace.fotos.lado_max'),
++                (int) config('marketplace.fotos.lado_miniatura'),
++            );
++        } catch (InvalidArgumentException $e) {
++            throw ValidationException::withMessages(['foto' => $e->getMessage()]);
++        }
++
++        $ruta      = trim($carpeta, '/').'/'.Str::lower((string) Str::ulid()).'.webp';
++        $miniatura = self::miniaturaDe($ruta);
++        $fs        = Storage::disk($disco);
++
++        try {
++            $fs->put($ruta, $imagen->principal);
++            $fs->put($miniatura, $imagen->miniatura);
++        } catch (Throwable $e) {
++            report($e);
++            $this->borrar($disco, $ruta);
++
++            throw ValidationException::withMessages([
++                'foto' => 'No pudimos guardar la foto. Intenta de nuevo en un momento.',
++            ]);
++        }
++
++        return ['ruta' => $ruta, 'hash_sha256' => $imagen->hash];
++    }
++
++    /** Borra la imagen y su miniatura. Un fallo del almacenamiento se reporta pero no rompe la petición. */
++    public function borrar(string $disco, string|array|null $rutas): void
++    {
++        $rutas = array_filter((array) $rutas);
++
++        $todas = [];
++        foreach ($rutas as $ruta) {
++            $todas[] = $ruta;
++            $todas[] = self::miniaturaDe($ruta);
++        }
++
++        if ($todas === []) {
++            return;
++        }
++
++        try {
++            Storage::disk($disco)->delete(array_values(array_unique($todas)));
++        } catch (Throwable $e) {
++            report($e);
++        }
++    }
++
++    public function urlPublica(?string $ruta): ?string
++    {
++        return $ruta ? Storage::disk($this->discoPublico())->url($ruta) : null;
++    }
++
++    /** URL firmada de vida corta para el disco privado. */
++    public function urlTemporal(string $ruta): string
++    {
++        return Storage::disk($this->discoPrivado())->temporaryUrl(
++            $ruta,
++            now()->addMinutes((int) config('marketplace.fotos.minutos_url_privada')),
++        );
++    }
++}
+diff --git a/app/Support/Imagenes/ImagenProcesada.php b/app/Support/Imagenes/ImagenProcesada.php
+new file mode 100644
+index 0000000..38ceec8
+--- /dev/null
++++ b/app/Support/Imagenes/ImagenProcesada.php
+@@ -0,0 +1,15 @@
++<?php
++
++namespace App\Support\Imagenes;
++
++/** Resultado de re-codificar una imagen subida: bytes WebP listos para guardar. */
++final class ImagenProcesada
++{
++    public function __construct(
++        public readonly string $principal,
++        public readonly string $miniatura,
++        public readonly string $hash,
++        public readonly int $ancho,
++        public readonly int $alto,
++    ) {}
++}
+diff --git a/app/Support/Imagenes/ProcesadorImagen.php b/app/Support/Imagenes/ProcesadorImagen.php
+new file mode 100644
+index 0000000..d7345e3
+--- /dev/null
++++ b/app/Support/Imagenes/ProcesadorImagen.php
+@@ -0,0 +1,141 @@
++<?php
++
++namespace App\Support\Imagenes;
++
++use GdImage;
++use Illuminate\Http\UploadedFile;
++use InvalidArgumentException;
++use RuntimeException;
++
++/**
++ * Re-codifica toda imagen subida (docs de seguridad, riesgo 5 y sección 8.2):
++ *
++ *  - Valida el tipo REAL por contenido (no por extensión ni por el MIME que declara el cliente).
++ *  - Limita el número de píxeles (evita "bombas de descompresión").
++ *  - Aplica la orientación EXIF y vuelve a codificar a WebP: se pierden EXIF, GPS
++ *    y cualquier carga útil escondida en la imagen original.
++ *  - Genera la versión principal y la miniatura, y el hash sha256 de la principal.
++ *
++ * Lanza InvalidArgumentException con mensajes pensados para mostrarse al usuario.
++ */
++final class ProcesadorImagen
++{
++    private const TIPOS_PERMITIDOS = [IMAGETYPE_JPEG, IMAGETYPE_PNG, IMAGETYPE_WEBP];
++
++    /** 25 megapíxeles: sobra para una foto de celular y acota la memoria de GD. */
++    private const MAX_PIXELES = 25_000_000;
++
++    private const CALIDAD_WEBP = 82;
++
++    public function procesar(UploadedFile $archivo, int $ladoMax = 1600, int $ladoMiniatura = 400): ImagenProcesada
++    {
++        if (! function_exists('imagecreatefromstring') || ! function_exists('imagewebp')) {
++            throw new RuntimeException('La extensión GD con soporte WebP no está disponible en el servidor.');
++        }
++
++        $ruta  = $archivo->getRealPath();
++        $bytes = $ruta ? @file_get_contents($ruta) : false;
++
++        if ($bytes === false || $bytes === '') {
++            throw new InvalidArgumentException('No pudimos leer la imagen. Intenta con otra.');
++        }
++
++        $info = @getimagesizefromstring($bytes);
++
++        if ($info === false || ! in_array($info[2], self::TIPOS_PERMITIDOS, true)) {
++            throw new InvalidArgumentException('Formato no permitido. Usa una imagen JPG, PNG o WebP.');
++        }
++
++        [$ancho, $alto] = $info;
++
++        if ($ancho < 1 || $alto < 1 || ($ancho * $alto) > self::MAX_PIXELES) {
++            throw new InvalidArgumentException('La imagen es demasiado grande. Reduce su resolución e inténtalo de nuevo.');
++        }
++
++        $origen = @imagecreatefromstring($bytes);
++
++        if (! $origen instanceof GdImage) {
++            throw new InvalidArgumentException('La imagen está dañada o no se pudo procesar.');
++        }
++
++        if ($info[2] === IMAGETYPE_JPEG) {
++            $origen = $this->orientar($origen, $this->orientacionExif($ruta));
++        }
++
++        $principal = $this->escalar($origen, $ladoMax);
++        $miniatura = $this->escalar($origen, $ladoMiniatura);
++
++        $datosPrincipal = $this->codificar($principal);
++
++        return new ImagenProcesada(
++            principal: $datosPrincipal,
++            miniatura: $this->codificar($miniatura),
++            hash: hash('sha256', $datosPrincipal),
++            ancho: imagesx($principal),
++            alto: imagesy($principal),
++        );
++    }
++
++    /** Orientación EXIF (1 = normal). Sin la extensión exif, se asume normal. */
++    private function orientacionExif(string $ruta): int
++    {
++        if (! function_exists('exif_read_data')) {
++            return 1;
++        }
++
++        try {
++            $exif = @exif_read_data($ruta);
++        } catch (\Throwable) {
++            return 1;
++        }
++
++        return is_array($exif) ? (int) ($exif['Orientation'] ?? 1) : 1;
++    }
++
++    private function orientar(GdImage $imagen, int $orientacion): GdImage
++    {
++        $girada = match ($orientacion) {
++            3       => imagerotate($imagen, 180, 0),
++            6       => imagerotate($imagen, -90, 0),
++            8       => imagerotate($imagen, 90, 0),
++            default => $imagen,
++        };
++
++        return $girada instanceof GdImage ? $girada : $imagen;
++    }
++
++    /** Reduce manteniendo proporción (nunca agranda). Fondo blanco para PNG con transparencia. */
++    private function escalar(GdImage $origen, int $ladoMax): GdImage
++    {
++        $ancho = imagesx($origen);
++        $alto  = imagesy($origen);
++        $factor = min(1, $ladoMax / max($ancho, $alto));
++
++        $nuevoAncho = max(1, (int) round($ancho * $factor));
++        $nuevoAlto  = max(1, (int) round($alto * $factor));
++
++        $destino = imagecreatetruecolor($nuevoAncho, $nuevoAlto);
++
++        if (! $destino instanceof GdImage) {
++            throw new RuntimeException('No se pudo reservar memoria para la imagen.');
++        }
++
++        imagefill($destino, 0, 0, (int) imagecolorallocate($destino, 255, 255, 255));
++        imagecopyresampled($destino, $origen, 0, 0, 0, 0, $nuevoAncho, $nuevoAlto, $ancho, $alto);
++
++        return $destino;
++    }
++
++    private function codificar(GdImage $imagen): string
++    {
++        ob_start();
++        $ok = imagewebp($imagen, null, self::CALIDAD_WEBP);
++        $datos = (string) ob_get_clean();
++
++        if (! $ok || $datos === '') {
++            throw new RuntimeException('No se pudo codificar la imagen a WebP.');
++        }
++
++        return $datos;
++    }
++}
+diff --git a/config/filesystems.php b/config/filesystems.php
+index 37d8fca..6401960 100644
+--- a/config/filesystems.php
++++ b/config/filesystems.php
+@@ -60,6 +60,34 @@
+             'report' => false,
+         ],
+ 
++        // Cloudflare R2 (compatible con S3). Dos buckets: uno público (foto de perfil y
++        // portafolio) y uno privado (evidencia de pedidos). R2 no admite ACL por objeto,
++        // por eso aquí NO se define 'visibility': lo público/privado lo da el bucket.
++        'r2_publico' => [
++            'driver' => 's3',
++            'key' => env('R2_ACCESS_KEY_ID'),
++            'secret' => env('R2_SECRET_ACCESS_KEY'),
++            'region' => 'auto',
++            'bucket' => env('R2_BUCKET_PUBLICO'),
++            'url' => env('R2_URL_PUBLICA'),
++            'endpoint' => env('R2_ENDPOINT'),
++            'use_path_style_endpoint' => true,
++            'throw' => true,
++            'report' => false,
++        ],
++
++        'r2_privado' => [
++            'driver' => 's3',
++            'key' => env('R2_ACCESS_KEY_ID'),
++            'secret' => env('R2_SECRET_ACCESS_KEY'),
++            'region' => 'auto',
++            'bucket' => env('R2_BUCKET_PRIVADO'),
++            'endpoint' => env('R2_ENDPOINT'),
++            'use_path_style_endpoint' => true,
++            'throw' => true,
++            'report' => false,
++        ],
++
+     ],
+ 
+     /*
+diff --git a/config/marketplace.php b/config/marketplace.php
+index ca1ae73..e1e1dab 100644
+--- a/config/marketplace.php
++++ b/config/marketplace.php
+@@ -20,6 +20,19 @@
+     // o 'mercadopago' (Checkout Pro; requiere MP_ACCESS_TOKEN).
+     'pasarela' => env('MARKETPLACE_PASARELA', 'simulada'),
+ 
++    // Fotos (perfil, portafolio y evidencia de pedidos). Ver docs/FOTOS.md.
++    // En local: 'public' y 'local'. En producción: 'r2_publico' y 'r2_privado' (Cloudflare R2).
++    'fotos' => [
++        'disco_publico'            => env('FOTOS_DISCO_PUBLICO', 'public'),
++        'disco_privado'            => env('FOTOS_DISCO_PRIVADO', 'local'),
++        'max_kb'                   => (int) env('FOTOS_MAX_KB', 6144),
++        'lado_max'                 => 1600,   // px, imagen principal
++        'lado_miniatura'           => 400,    // px, miniatura
++        'max_por_servicio'         => 8,      // fotos de portafolio por servicio
++        'max_evidencias_por_parte' => 12,     // fotos de evidencia por pedido y por persona
++        'minutos_url_privada'      => 5,
++    ],
++
+     // Interruptores de módulos (ver TransicionesPedido::mapa()).
+     'cotizaciones_habilitadas' => (bool) env('MARKETPLACE_COTIZACIONES', false),
+     'escrow_habilitado'        => (bool) env('MARKETPLACE_ESCROW', false),
+diff --git a/database/migrations/2026_11_16_000001_add_foto_path_to_users_table.php b/database/migrations/2026_11_16_000001_add_foto_path_to_users_table.php
+new file mode 100644
+index 0000000..55a23bd
+--- /dev/null
++++ b/database/migrations/2026_11_16_000001_add_foto_path_to_users_table.php
+@@ -0,0 +1,26 @@
++<?php
++
++use Illuminate\Database\Migrations\Migration;
++use Illuminate\Database\Schema\Blueprint;
++use Illuminate\Support\Facades\Schema;
++
++return new class extends Migration
++{
++    /**
++     * Foto de perfil (RF-03). Solo se guarda la ruta de la imagen principal;
++     * la miniatura se deriva de ella (AlmacenFotos::miniaturaDe).
++     */
++    public function up(): void
++    {
++        Schema::table('users', function (Blueprint $table) {
++            $table->string('foto_path')->nullable()->after('password');
++        });
++    }
++
++    public function down(): void
++    {
++        Schema::table('users', function (Blueprint $table) {
++            $table->dropColumn('foto_path');
++        });
++    }
++};
+diff --git a/database/migrations/2026_11_16_000002_create_fotos_trabajo_table.php b/database/migrations/2026_11_16_000002_create_fotos_trabajo_table.php
+new file mode 100644
+index 0000000..3017ab7
+--- /dev/null
++++ b/database/migrations/2026_11_16_000002_create_fotos_trabajo_table.php
+@@ -0,0 +1,31 @@
++<?php
++
++use Illuminate\Database\Migrations\Migration;
++use Illuminate\Database\Schema\Blueprint;
++use Illuminate\Support\Facades\Schema;
++
++return new class extends Migration
++{
++    /** Portafolio público: muestra de trabajos realizados de cada servicio (RF-10, RF-19). */
++    public function up(): void
++    {
++        Schema::create('fotos_trabajo', function (Blueprint $table) {
++            $table->id();
++            $table->foreignId('servicio_id')->constrained('servicios')->cascadeOnDelete();
++
++            // Ruta de la imagen principal en el disco público; la miniatura se deriva.
++            $table->string('ruta');
++            $table->string('hash_sha256', 64);
++            $table->string('pie', 160)->nullable();
++            $table->unsignedSmallInteger('orden')->default(0);
++            $table->timestamps();
++
++            $table->index(['servicio_id', 'orden']);
++        });
++    }
++
++    public function down(): void
++    {
++        Schema::dropIfExists('fotos_trabajo');
++    }
++};
+diff --git a/database/migrations/2026_11_16_000003_create_fotos_evidencia_table.php b/database/migrations/2026_11_16_000003_create_fotos_evidencia_table.php
+new file mode 100644
+index 0000000..afa971f
+--- /dev/null
++++ b/database/migrations/2026_11_16_000003_create_fotos_evidencia_table.php
+@@ -0,0 +1,37 @@
++<?php
++
++use Illuminate\Database\Migrations\Migration;
++use Illuminate\Database\Schema\Blueprint;
++use Illuminate\Support\Facades\Schema;
++
++return new class extends Migration
++{
++    /**
++     * Evidencia fotográfica de un pedido (antes / durante / después).
++     * Son fotos del interior de un domicilio: viven en el disco PRIVADO y solo
++     * se leen con URL temporal firmada, tras autorizar cada acceso.
++     */
++    public function up(): void
++    {
++        Schema::create('fotos_evidencia', function (Blueprint $table) {
++            $table->id();
++            $table->foreignId('pedido_id')->constrained('pedidos')->cascadeOnDelete();
++
++            // Si la cuenta se elimina, la evidencia del pedido se conserva (disputas, auditoría).
++            $table->foreignId('subida_por')->nullable()->constrained('users')->nullOnDelete();
++
++            $table->string('fase', 12)->default('durante'); // antes | durante | despues
++            $table->string('ruta');
++            $table->string('hash_sha256', 64);
++            $table->string('pie', 160)->nullable();
++            $table->timestamps();
++
++            $table->index('pedido_id');
++        });
++    }
++
++    public function down(): void
++    {
++        Schema::dropIfExists('fotos_evidencia');
++    }
++};
+diff --git a/docs/FOTOS.md b/docs/FOTOS.md
+new file mode 100644
+index 0000000..3b8b686
+--- /dev/null
++++ b/docs/FOTOS.md
+@@ -0,0 +1,28 @@
++# Fotos: perfil, portafolio y evidencia
++
++## Qué hay
++| Uso | Quién sube | Dónde se guarda | Cómo se lee |
++|---|---|---|---|
++| Foto de perfil | cualquier usuario | disco **público** (`perfiles/{user}/…`) | URL pública (miniatura 400 px) |
++| Portafolio del servicio (catálogo y perfil público) | prestador verificado, dueño del servicio, máx. 8 por servicio | disco **público** (`portafolio/{servicio}/…`) | URL pública |
++| Evidencia del pedido (antes/durante/después) | prestador (en_progreso, completado) y cliente (completado, en_disputa), máx. 12 por persona | disco **privado** (`evidencia/{pedido}/…`) | `GET /evidencias/{id}` → autoriza → redirige a URL firmada de 5 min |
++
++Perfil público del prestador: `GET /prestadores/{id}` (solo verificados).
++
++## Seguridad aplicada
++- Tipo real por contenido (`getimagesizefromstring`), solo JPG/PNG/WebP; SVG rechazado.
++- Límite de 25 megapíxeles y 6 MB; toda imagen se **re-codifica a WebP** (sin EXIF/GPS ni cargas ocultas).
++- Nombres aleatorios (ULID); nunca el nombre original.
++- Evidencia privada: nunca URL pública, cada lectura autorizada por `PedidoPolicy`; el mediador solo con el pedido en disputa y con rastro en `log_auditoria`.
++- El Service Worker nunca cachea `/evidencias/*`.
++- Subidas con `throttle` por usuario.
++
++## Configuración
++Local (sin Cloudflare): `FOTOS_DISCO_PUBLICO=public`, `FOTOS_DISCO_PRIVADO=local` y `php artisan storage:link`.
++Producción: `FOTOS_DISCO_PUBLICO=r2_publico`, `FOTOS_DISCO_PRIVADO=r2_privado` + variables `R2_*` (ver `.env.example`).
++Render gratis tiene disco efímero: sin R2 las fotos se pierden en cada despliegue.
++
++## Alcance actual (pendiente)
++- Subida con cola offline (hoy las fotos requieren conexión; el resto de la app sí funciona offline).
++- Reseñas con fotos (RF-36) y publicar evidencia en el portafolio (requiere flujo de consentimiento del cliente).
++- Limpieza de huérfanos si falla un borrado en el almacenamiento.
+diff --git a/resources/js/Components/AvatarUsuario.vue b/resources/js/Components/AvatarUsuario.vue
+new file mode 100644
+index 0000000..787c44f
+--- /dev/null
++++ b/resources/js/Components/AvatarUsuario.vue
+@@ -0,0 +1,35 @@
++<script setup>
++import { computed, ref, watch } from 'vue'
++
++/** Foto de perfil o, si no hay (o falla la carga), las iniciales del nombre. */
++const props = defineProps({
++  nombre: { type: String, default: '' },
++  url: { type: String, default: null },
++  clase: { type: String, default: 'w-9 h-9 text-xs' }, // tamaño y tipografía
++})
++
++const fallo = ref(false)
++watch(() => props.url, () => (fallo.value = false))
++
++const iniciales = computed(() => {
++  const partes = String(props.nombre || '?').trim().split(/\s+/)
++  return ((partes[0]?.[0] || '') + (partes[1]?.[0] || '')).toUpperCase() || '?'
++})
++</script>
++
++<template>
++  <span
++    class="shrink-0 rounded-xl overflow-hidden bg-gradient-to-br from-principal to-[#1d4a8a] text-white font-extrabold flex items-center justify-center shadow-sm"
++    :class="clase"
++  >
++    <img
++      v-if="url && !fallo"
++      :src="url"
++      :alt="`Foto de ${nombre || 'usuario'}`"
++      loading="lazy"
++      class="w-full h-full object-cover"
++      @error="fallo = true"
++    />
++    <span v-else aria-hidden="true">{{ iniciales }}</span>
++  </span>
++</template>
+diff --git a/resources/js/Components/EvidenciaPedido.vue b/resources/js/Components/EvidenciaPedido.vue
+new file mode 100644
+index 0000000..08ed162
+--- /dev/null
++++ b/resources/js/Components/EvidenciaPedido.vue
+@@ -0,0 +1,186 @@
++<script setup>
++import { computed, ref } from 'vue'
++import axios from 'axios'
++import Modal from '@/Components/Modal.vue'
++import SubidorFoto from '@/Components/SubidorFoto.vue'
++
++/**
++ * Evidencia fotográfica de un pedido (antes / durante / después). Es PRIVADA: solo la ven
++ * el cliente y el prestador del pedido (y el mediador si hay disputa). Las imágenes se
++ * piden a /evidencias/{id}, que autoriza y redirige a una URL firmada de pocos minutos.
++ */
++const props = defineProps({
++  pedidoId: { type: Number, required: true },
++  etiqueta: { type: String, default: 'Fotos del trabajo' },
++})
++
++const FASES = [
++  { valor: 'antes', texto: 'Antes' },
++  { valor: 'durante', texto: 'Durante' },
++  { valor: 'despues', texto: 'Después' },
++]
++const textoFase = (v) => FASES.find((f) => f.valor === v)?.texto ?? v
++
++const abierto = ref(false)
++const cargando = ref(false)
++const subiendo = ref(false)
++const error = ref('')
++const datos = ref({ puede_subir: false, maximo: 12, fotos: [] })
++const fase = ref('despues')
++const pie = ref('')
++const ampliada = ref(null)
++
++const total = computed(() => datos.value.fotos.length)
++
++const mensajeError = (e, porDefecto) => {
++  if (!e.response) return 'Sin conexión: las fotos necesitan internet para subirse y verse.'
++  return e.response.data?.errors?.foto?.[0] || e.response.data?.message || porDefecto
++}
++
++const cargar = async () => {
++  cargando.value = true
++  error.value = ''
++  try {
++    const { data } = await axios.get(route('evidencias.index', props.pedidoId))
++    datos.value = data
++  } catch (e) {
++    error.value = mensajeError(e, 'No pudimos cargar las fotos.')
++  } finally {
++    cargando.value = false
++  }
++}
++
++const abrir = () => {
++  abierto.value = true
++  cargar()
++}
++
++const subir = async (archivo) => {
++  subiendo.value = true
++  error.value = ''
++  const cuerpo = new FormData()
++  cuerpo.append('foto', archivo)
++  cuerpo.append('fase', fase.value)
++  if (pie.value) cuerpo.append('pie', pie.value)
++
++  try {
++    await axios.post(route('evidencias.store', props.pedidoId), cuerpo)
++    pie.value = ''
++    await cargar()
++  } catch (e) {
++    error.value = mensajeError(e, 'No se pudo subir la foto.')
++  } finally {
++    subiendo.value = false
++  }
++}
++
++const eliminar = async (foto) => {
++  if (!confirm('¿Eliminar esta foto de evidencia?')) return
++  try {
++    await axios.delete(route('evidencias.destroy', foto.id))
++    await cargar()
++  } catch (e) {
++    error.value = mensajeError(e, 'No se pudo eliminar la foto.')
++  }
++}
++</script>
++
++<template>
++  <button
++    type="button"
++    class="inline-flex items-center gap-1.5 px-3.5 py-2 bg-white hover:bg-niebla text-principal text-xs font-bold rounded-xl border-2 border-slate-200 hover:border-principal/40 transition active:scale-95"
++    @click="abrir"
++  >
++    <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
++      <path stroke-linecap="round" stroke-linejoin="round" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
++    </svg>
++    {{ etiqueta }}
++  </button>
++
++  <Modal :show="abierto" max-width="2xl" @close="abierto = false">
++    <div class="p-6 space-y-5">
++      <div class="flex items-start justify-between gap-3">
++        <div>
++          <h2 class="text-lg font-extrabold text-principal">Evidencia del pedido #{{ pedidoId }}</h2>
++          <p class="text-xs text-gris-medio mt-0.5">
++            Privadas: solo las ven el cliente, el prestador y, si hay disputa, el mediador.
++          </p>
++        </div>
++        <button type="button" class="p-1 text-gris-medio hover:text-principal" aria-label="Cerrar" @click="abierto = false">
++          <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
++        </button>
++      </div>
++
++      <p v-if="error" class="px-3 py-2 rounded-xl bg-red-50 border border-red-200 text-xs font-semibold text-red-700" role="alert">{{ error }}</p>
++
++      <p v-if="cargando && !total" class="text-sm text-gris-medio">Cargando fotos…</p>
++      <p v-else-if="!total" class="text-sm text-gris-medio">Todavía no hay fotos en este pedido.</p>
++
++      <ul v-else class="grid grid-cols-2 sm:grid-cols-3 gap-3">
++        <li v-for="foto in datos.fotos" :key="foto.id" class="rounded-2xl border border-slate-200 overflow-hidden bg-white">
++          <button type="button" class="relative block w-full aspect-square bg-niebla" @click="ampliada = foto">
++            <img :src="foto.url_miniatura" :alt="foto.pie || textoFase(foto.fase)" loading="lazy" class="w-full h-full object-cover" />
++            <span class="absolute top-2 left-2 px-2 py-0.5 rounded-full bg-principal/90 text-white text-[10px] font-bold uppercase tracking-wider">
++              {{ textoFase(foto.fase) }}
++            </span>
++          </button>
++          <div class="p-2 flex items-center justify-between gap-2">
++            <span class="text-[11px] text-gris-medio truncate">
++              {{ foto.autor === 'cliente' ? 'Cliente' : 'Prestador' }}<template v-if="foto.pie"> · {{ foto.pie }}</template>
++            </span>
++            <button v-if="foto.puede_eliminar" type="button" class="shrink-0 text-[11px] font-bold text-red-600 hover:underline" @click="eliminar(foto)">
++              Eliminar
++            </button>
++          </div>
++        </li>
++      </ul>
++
++      <div v-if="datos.puede_subir" class="pt-4 border-t border-slate-200 space-y-3">
++        <p class="text-xs font-bold uppercase tracking-wider text-principal">
++          Agregar foto <span class="font-semibold text-gris-medio normal-case tracking-normal">(máx. {{ datos.maximo }} por persona)</span>
++        </p>
++
++        <div class="flex flex-wrap gap-2" role="radiogroup" aria-label="Momento del trabajo">
++          <button
++            v-for="f in FASES"
++            :key="f.valor"
++            type="button"
++            role="radio"
++            :aria-checked="fase === f.valor"
++            class="px-3 py-1.5 rounded-full text-xs font-bold border-2 transition"
++            :class="fase === f.valor ? 'bg-principal text-white border-principal' : 'bg-white text-principal border-slate-200 hover:border-principal/40'"
++            @click="fase = f.valor"
++          >
++            {{ f.texto }}
++          </button>
++        </div>
++
++        <input
++          v-model="pie"
++          type="text"
++          maxlength="160"
++          placeholder="Descripción breve (opcional)"
++          class="block w-full rounded-xl border-slate-300 focus:border-principal focus:ring-principal text-sm py-2 px-3"
++        />
++
++        <div class="flex flex-wrap gap-2">
++          <SubidorFoto etiqueta="Tomar foto" :camara="true" :cargando="subiendo" @seleccionada="subir" />
++          <SubidorFoto etiqueta="Elegir de la galería" variante="secundario" :cargando="subiendo" @seleccionada="subir" />
++        </div>
++      </div>
++    </div>
++
++    <div
++      v-if="ampliada"
++      class="fixed inset-0 z-[100] bg-black/90 flex items-center justify-center p-4"
++      role="dialog"
++      aria-modal="true"
++      @click.self="ampliada = null"
++    >
++      <button type="button" class="absolute top-4 right-4 p-2 text-white/80 hover:text-white" aria-label="Cerrar" @click="ampliada = null">
++        <svg class="w-7 h-7" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
++      </button>
++      <img :src="ampliada.url" :alt="ampliada.pie || textoFase(ampliada.fase)" class="max-h-[85vh] max-w-full rounded-xl object-contain" />
++    </div>
++  </Modal>
++</template>
+diff --git a/resources/js/Components/GaleriaFotos.vue b/resources/js/Components/GaleriaFotos.vue
+new file mode 100644
+index 0000000..10a0365
+--- /dev/null
++++ b/resources/js/Components/GaleriaFotos.vue
+@@ -0,0 +1,85 @@
++<script setup>
++import { computed, onMounted, onUnmounted, ref } from 'vue'
++
++/** Cuadrícula de fotos con visor a pantalla completa (teclado: ← → Esc). */
++const props = defineProps({
++  fotos: { type: Array, default: () => [] }, // [{ url, url_miniatura, pie, servicio }]
++})
++
++const indice = ref(null)
++const actual = computed(() => (indice.value === null ? null : props.fotos[indice.value]))
++
++const abrir = (i) => (indice.value = i)
++const cerrar = () => (indice.value = null)
++const mover = (delta) => {
++  if (indice.value === null) return
++  indice.value = (indice.value + delta + props.fotos.length) % props.fotos.length
++}
++
++const teclado = (e) => {
++  if (indice.value === null) return
++  if (e.key === 'Escape') cerrar()
++  if (e.key === 'ArrowRight') mover(1)
++  if (e.key === 'ArrowLeft') mover(-1)
++}
++onMounted(() => window.addEventListener('keydown', teclado))
++onUnmounted(() => window.removeEventListener('keydown', teclado))
++</script>
++
++<template>
++  <div>
++    <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
++      <button
++        v-for="(foto, i) in fotos"
++        :key="foto.id ?? i"
++        type="button"
++        class="group relative aspect-square overflow-hidden rounded-2xl bg-niebla border border-slate-200 focus:outline-none focus:ring-2 focus:ring-principal"
++        :aria-label="foto.pie ? `Ampliar: ${foto.pie}` : 'Ampliar foto'"
++        @click="abrir(i)"
++      >
++        <img
++          :src="foto.url_miniatura || foto.url"
++          :alt="foto.pie || foto.servicio || 'Trabajo realizado'"
++          loading="lazy"
++          class="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
++        />
++        <span
++          v-if="foto.pie"
++          class="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/70 to-transparent px-2.5 pt-6 pb-2 text-left text-[11px] font-semibold text-white line-clamp-2"
++        >
++          {{ foto.pie }}
++        </span>
++      </button>
++    </div>
++
++    <Teleport to="body">
++      <div
++        v-if="actual"
++        class="fixed inset-0 z-[100] bg-black/90 flex items-center justify-center p-4"
++        role="dialog"
++        aria-modal="true"
++        @click.self="cerrar"
++      >
++        <button type="button" class="absolute top-4 right-4 p-2 text-white/80 hover:text-white" aria-label="Cerrar" @click="cerrar">
++          <svg class="w-7 h-7" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
++        </button>
++
++        <button v-if="fotos.length > 1" type="button" class="absolute left-3 p-3 text-white/80 hover:text-white" aria-label="Anterior" @click="mover(-1)">
++          <svg class="w-8 h-8" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7" /></svg>
++        </button>
++
++        <figure class="max-w-4xl max-h-full flex flex-col items-center gap-3">
++          <img :src="actual.url" :alt="actual.pie || 'Trabajo realizado'" class="max-h-[80vh] max-w-full rounded-xl object-contain" />
++          <figcaption v-if="actual.pie || actual.servicio" class="text-center text-sm text-white/90">
++            <span v-if="actual.pie" class="font-semibold">{{ actual.pie }}</span>
++            <span v-if="actual.servicio" class="block text-xs text-white/60">{{ actual.servicio }}</span>
++          </figcaption>
++        </figure>
++
++        <button v-if="fotos.length > 1" type="button" class="absolute right-3 p-3 text-white/80 hover:text-white" aria-label="Siguiente" @click="mover(1)">
++          <svg class="w-8 h-8" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7" /></svg>
++        </button>
++      </div>
++    </Teleport>
++  </div>
++</template>
+diff --git a/resources/js/Components/PortafolioServicio.vue b/resources/js/Components/PortafolioServicio.vue
+new file mode 100644
+index 0000000..da1efc9
+--- /dev/null
++++ b/resources/js/Components/PortafolioServicio.vue
+@@ -0,0 +1,107 @@
++<script setup>
++import { computed, ref } from 'vue'
++import { router } from '@inertiajs/vue3'
++import SubidorFoto from '@/Components/SubidorFoto.vue'
++
++/**
++ * Portafolio de un servicio: el prestador sube, ordena y elimina fotos de trabajos realizados.
++ * La primera foto es la portada que ven los clientes en el catálogo.
++ */
++const props = defineProps({
++  servicio: { type: Object, required: true }, // { id, titulo, fotos: [...] }
++  max: { type: Number, default: 8 },
++})
++
++const fotos = computed(() => props.servicio.fotos ?? [])
++const lleno = computed(() => fotos.value.length >= props.max)
++
++const subiendo = ref(false)
++const error = ref('')
++const pieNuevo = ref('')
++
++const subir = (archivo) => {
++  subiendo.value = true
++  error.value = ''
++  router.post(
++    route('servicios.fotos.store', props.servicio.id),
++    { foto: archivo, pie: pieNuevo.value || null },
++    {
++      forceFormData: true,
++      preserveScroll: true,
++      onSuccess: () => (pieNuevo.value = ''),
++      onError: (e) => (error.value = e.foto || e.pie || 'No se pudo subir la foto.'),
++      onFinish: () => (subiendo.value = false),
++    },
++  )
++}
++
++const guardarPie = (foto, valor) => {
++  if ((valor || '') === (foto.pie || '')) return
++  router.patch(route('fotos-trabajo.update', foto.id), { pie: valor }, { preserveScroll: true })
++}
++
++const hacerPortada = (foto) =>
++  router.patch(route('fotos-trabajo.update', foto.id), { portada: true }, { preserveScroll: true })
++
++const eliminar = (foto) => {
++  if (!confirm('¿Eliminar esta foto de tu portafolio?')) return
++  router.delete(route('fotos-trabajo.destroy', foto.id), { preserveScroll: true })
++}
++</script>
++
++<template>
++  <div class="space-y-4">
++    <div class="flex items-center justify-between gap-3">
++      <p class="text-xs font-bold uppercase tracking-wider text-principal">
++        Fotos de trabajos realizados
++        <span class="ms-1 font-semibold text-gris-medio normal-case tracking-normal">({{ fotos.length }}/{{ max }})</span>
++      </p>
++    </div>
++
++    <p v-if="!fotos.length" class="text-xs text-gris-medio">
++      Los servicios con fotos reales reciben más solicitudes. Muestra trabajos terminados (sin personas ni datos del cliente).
++    </p>
++
++    <ul v-else class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
++      <li v-for="(foto, i) in fotos" :key="foto.id" class="bg-white rounded-2xl border border-slate-200 overflow-hidden flex flex-col">
++        <div class="relative aspect-[4/3] bg-niebla">
++          <img :src="foto.url_miniatura" :alt="foto.pie || 'Trabajo realizado'" loading="lazy" class="w-full h-full object-cover" />
++          <span v-if="i === 0" class="absolute top-2 left-2 px-2 py-0.5 rounded-full bg-acento text-principal text-[10px] font-extrabold uppercase tracking-wider shadow">
++            Portada
++          </span>
++        </div>
++        <div class="p-2.5 space-y-2">
++          <input
++            type="text"
++            maxlength="160"
++            :value="foto.pie"
++            placeholder="Pie de foto (opcional)"
++            class="block w-full rounded-lg border-slate-300 focus:border-principal focus:ring-principal text-xs py-1.5 px-2"
++            @change="guardarPie(foto, $event.target.value)"
++          />
++          <div class="flex items-center justify-between gap-2">
++            <button v-if="i !== 0" type="button" class="text-[11px] font-bold text-principal hover:underline" @click="hacerPortada(foto)">
++              Usar de portada
++            </button>
++            <span v-else></span>
++            <button type="button" class="text-[11px] font-bold text-red-600 hover:underline" @click="eliminar(foto)">Eliminar</button>
++          </div>
++        </div>
++      </li>
++    </ul>
++
++    <div v-if="!lleno" class="flex flex-wrap items-end gap-3">
++      <input
++        v-model="pieNuevo"
++        type="text"
++        maxlength="160"
++        placeholder="Pie de la nueva foto (opcional)"
++        class="flex-1 min-w-[12rem] rounded-xl border-slate-300 focus:border-principal focus:ring-principal text-sm py-2 px-3"
++      />
++      <SubidorFoto etiqueta="Agregar foto" :cargando="subiendo" @seleccionada="subir" />
++    </div>
++    <p v-else class="text-xs font-semibold text-amber-700">Llegaste al máximo de fotos. Elimina alguna para subir otra.</p>
++
++    <p v-if="error" class="text-xs font-semibold text-red-600" role="alert">{{ error }}</p>
++  </div>
++</template>
+diff --git a/resources/js/Components/SubidorFoto.vue b/resources/js/Components/SubidorFoto.vue
+new file mode 100644
+index 0000000..fa606f5
+--- /dev/null
++++ b/resources/js/Components/SubidorFoto.vue
+@@ -0,0 +1,66 @@
++<script setup>
++import { ref } from 'vue'
++import { comprimirImagen } from '@/composables/useImagenes'
++
++/**
++ * Botón para elegir (o tomar) una foto. Comprime en el navegador y emite
++ * `seleccionada` con un File listo para subir. NO sube nada por sí mismo.
++ */
++const props = defineProps({
++  etiqueta: { type: String, default: 'Elegir foto' },
++  camara: { type: Boolean, default: false }, // abre directamente la cámara trasera en el celular
++  deshabilitado: { type: Boolean, default: false },
++  cargando: { type: Boolean, default: false },
++  variante: { type: String, default: 'primario' }, // primario | secundario
++})
++
++const emit = defineEmits(['seleccionada'])
++
++const error = ref('')
++const procesando = ref(false)
++
++const alElegir = async (evento) => {
++  const archivo = evento.target.files?.[0]
++  evento.target.value = '' // permite elegir de nuevo la misma foto
++  if (!archivo) return
++
++  error.value = ''
++  procesando.value = true
++  try {
++    emit('seleccionada', await comprimirImagen(archivo))
++  } catch (e) {
++    error.value = e?.message || 'No pudimos preparar la foto.'
++  } finally {
++    procesando.value = false
++  }
++}
++</script>
++
++<template>
++  <div>
++    <label
++      class="relative inline-flex items-center gap-2 px-4 py-2.5 text-xs font-bold rounded-xl shadow-sm transition-all duration-200 cursor-pointer focus-within:ring-2 focus-within:ring-principal focus-within:ring-offset-2"
++      :class="[
++        variante === 'primario'
++          ? 'bg-principal text-white hover:bg-slate-800'
++          : 'bg-white text-principal border-2 border-slate-200 hover:border-principal/40',
++        (deshabilitado || cargando || procesando) ? 'opacity-50 pointer-events-none' : 'active:scale-95',
++      ]"
++    >
++      <input
++        type="file"
++        accept="image/jpeg,image/png,image/webp"
++        :capture="camara ? 'environment' : undefined"
++        class="sr-only"
++        :disabled="deshabilitado || cargando || procesando"
++        @change="alElegir"
++      />
++      <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
++        <path stroke-linecap="round" stroke-linejoin="round" d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
++        <path stroke-linecap="round" stroke-linejoin="round" d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
++      </svg>
++      <span>{{ procesando ? 'Preparando…' : cargando ? 'Subiendo…' : etiqueta }}</span>
++    </label>
++    <p v-if="error" class="mt-1.5 text-xs font-semibold text-red-600" role="alert">{{ error }}</p>
++  </div>
++</template>
+diff --git a/resources/js/Layouts/AuthenticatedLayout.vue b/resources/js/Layouts/AuthenticatedLayout.vue
+index ff1ea40..51a15ba 100644
+--- a/resources/js/Layouts/AuthenticatedLayout.vue
++++ b/resources/js/Layouts/AuthenticatedLayout.vue
+@@ -5,6 +5,7 @@ import DropdownLink from '@/Components/DropdownLink.vue'
+ import ResponsiveNavLink from '@/Components/ResponsiveNavLink.vue'
+ import { Link, usePage } from '@inertiajs/vue3'
+ import Toast from '@/Components/Toast.vue'
++import AvatarUsuario from '@/Components/AvatarUsuario.vue'
+ 
+ const showingNavigationDropdown = ref(false)
+ const page = usePage()
+@@ -74,8 +75,13 @@ const claseEnlace = (activo) => [
+                     <span class="inline-flex rounded-md">
+                       <button
+                         type="button"
+-                        class="inline-flex items-center rounded-xl border border-white/20 bg-white/10 px-4 py-2 text-sm font-bold text-white transition duration-200 ease-in-out hover:bg-white/20 focus:outline-none"
++                        class="inline-flex items-center gap-2.5 rounded-xl border border-white/20 bg-white/10 px-3 py-1.5 text-sm font-bold text-white transition duration-200 ease-in-out hover:bg-white/20 focus:outline-none"
+                       >
++                        <AvatarUsuario
++                          :nombre="$page.props.auth?.user?.nombre"
++                          :url="$page.props.auth?.user?.fotoUrl"
++                          clase="w-7 h-7 text-[10px]"
++                        />
+                         {{ $page.props.auth?.user?.nombre || $page.props.auth?.user?.name }}
+ 
+                         <svg
+@@ -178,13 +184,20 @@ const claseEnlace = (activo) => [
+           </div>
+ 
+           <div class="border-t border-slate-200 pb-1 pt-4">
+-            <div class="px-4">
++            <div class="px-4 flex items-center gap-3">
++              <AvatarUsuario
++                :nombre="$page.props.auth?.user?.nombre"
++                :url="$page.props.auth?.user?.fotoUrl"
++                clase="w-10 h-10 text-sm"
++              />
++              <div>
+               <div class="text-base font-bold text-principal">
+                 {{ $page.props.auth?.user?.nombre || $page.props.auth?.user?.name }}
+               </div>
+               <div class="text-sm font-medium text-gris-medio">
+                 {{ $page.props.auth?.user?.email }}
+               </div>
++              </div>
+             </div>
+ 
+             <div class="mt-3 space-y-1">
+diff --git a/resources/js/Pages/Dashboard.vue b/resources/js/Pages/Dashboard.vue
+index c54c911..9f59dcf 100644
+--- a/resources/js/Pages/Dashboard.vue
++++ b/resources/js/Pages/Dashboard.vue
+@@ -3,6 +3,7 @@ import { ref, computed, onMounted, watch } from 'vue'
+ import { Head, router, useForm, usePage } from '@inertiajs/vue3'
+ import AuthenticatedLayout from '@/Layouts/AuthenticatedLayout.vue'
+ import BuscadorUbicacion from '@/Components/BuscadorUbicacion.vue'
++import EvidenciaPedido from '@/Components/EvidenciaPedido.vue'
+ import { useGeolocalizacion, redondear } from '@/composables/useGeolocalizacion'
+ import { encolar, mostrarAviso } from '@/offline/sync'
+ import { guardarDashboard } from '@/offline/snapshots'
+@@ -633,6 +634,10 @@ const marcarNotificacionesLeidas = () => {
+                 >
+                   Finalizar trabajo
+                 </button>
++                <EvidenciaPedido
++                  v-if="['en_progreso', 'completado', 'en_disputa', 'confirmado'].includes(p.estado)"
++                  :pedido-id="p.id"
++                />
+               </div>
+             </div>
+           </div>
+@@ -924,6 +929,11 @@ const marcarNotificacionesLeidas = () => {
+                 </button>
+               </div>
+ 
++              <!-- Evidencia fotográfica (privada): cuando el trabajo ya empezó -->
++              <div v-if="['en_progreso', 'completado', 'en_disputa', 'confirmado'].includes(p.estado)" class="pt-3 border-t border-slate-200">
++                <EvidenciaPedido :pedido-id="p.id" />
++              </div>
++
+               <!-- Reseña: el backend solo acepta calificar pedidos confirmados -->
+               <div v-if="p.estado === 'confirmado'" class="pt-4 border-t border-slate-200">
+                 <div v-if="p.resena" class="space-y-1">
+diff --git a/resources/js/Pages/Prestador/PerfilEdit.vue b/resources/js/Pages/Prestador/PerfilEdit.vue
+index 1c047a1..8ce54ef 100644
+--- a/resources/js/Pages/Prestador/PerfilEdit.vue
++++ b/resources/js/Pages/Prestador/PerfilEdit.vue
+@@ -4,12 +4,14 @@ import { Head, useForm, router } from '@inertiajs/vue3'
+ import AuthenticatedLayout from '@/Layouts/AuthenticatedLayout.vue'
+ import BuscadorUbicacion from '@/Components/BuscadorUbicacion.vue'
+ import MapaUbicacion from '@/Components/MapaUbicacion.vue'
++import PortafolioServicio from '@/Components/PortafolioServicio.vue'
+ import { useGeolocalizacion, redondear } from '@/composables/useGeolocalizacion'
+ 
+ const props = defineProps({
+   perfil: Object,
+   categorias: { type: Array, default: () => [] },
+   serviciosPropios: { type: Array, default: () => [] },
++  maxFotosServicio: { type: Number, default: 8 },
+ })
+ 
+ // Formulario del perfil
+@@ -390,6 +392,32 @@ const iconos = {
+           </form>
+         </div>
+       </div>
++
++      <!-- ============ PORTAFOLIO DE FOTOS ============ -->
++      <section v-if="serviciosPropios.length" class="space-y-5">
++        <div class="flex flex-wrap items-center justify-between gap-3">
++          <div>
++            <h2 class="text-xl font-extrabold text-principal tracking-tight">Fotos de tus servicios</h2>
++            <p class="text-xs text-gris-medio mt-0.5">La primera foto de cada servicio es la portada que ven los clientes en el catálogo.</p>
++          </div>
++          <a
++            v-if="estaVerificado"
++            :href="route('prestadores.show', perfil.id)"
++            class="text-xs font-bold text-principal hover:underline"
++          >
++            Ver mi perfil público →
++          </a>
++        </div>
++
++        <div
++          v-for="s in serviciosPropios"
++          :key="s.id"
++          class="bg-white rounded-3xl p-6 border-2 border-slate-200/90 shadow-md space-y-4"
++        >
++          <h3 class="text-base font-extrabold text-principal">{{ s.titulo }}</h3>
++          <PortafolioServicio :servicio="s" :max="maxFotosServicio" />
++        </div>
++      </section>
+     </div>
+   </AuthenticatedLayout>
+ </template>
+\ No newline at end of file
+diff --git a/resources/js/Pages/Prestadores/Show.vue b/resources/js/Pages/Prestadores/Show.vue
+new file mode 100644
+index 0000000..2f7807a
+--- /dev/null
++++ b/resources/js/Pages/Prestadores/Show.vue
+@@ -0,0 +1,139 @@
++<script setup>
++import { computed } from 'vue'
++import { Head, Link, usePage } from '@inertiajs/vue3'
++import AuthenticatedLayout from '@/Layouts/AuthenticatedLayout.vue'
++import AvatarUsuario from '@/Components/AvatarUsuario.vue'
++import GaleriaFotos from '@/Components/GaleriaFotos.vue'
++
++const props = defineProps({
++  prestador: { type: Object, required: true },
++  servicios: { type: Array, default: () => [] },
++  galeria: { type: Array, default: () => [] },
++  resumen: { type: Object, default: () => ({ promedio: null, total_resenas: 0, trabajos_confirmados: 0 }) },
++  resenas: { type: Array, default: () => [] },
++})
++
++const page = usePage()
++const estaAutenticado = computed(() => !!page.props.auth?.user)
++const Contenedor = computed(() => (estaAutenticado.value ? AuthenticatedLayout : 'div'))
++
++const estrellas = (n) => '★'.repeat(n) + '☆'.repeat(5 - n)
++const desde = computed(() => (props.prestador.miembro_desde ? props.prestador.miembro_desde.slice(0, 4) : null))
++</script>
++
++<template>
++  <Head :title="`${prestador.nombre} - OficiosYa`" />
++
++  <component :is="Contenedor">
++    <div :class="estaAutenticado ? '' : 'min-h-screen bg-niebla text-grafito font-sans'">
++
++      <header v-if="!estaAutenticado" class="bg-principal border-b border-principal/20 sticky top-0 z-50 shadow-md">
++        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-20 flex items-center justify-between">
++          <Link href="/" class="flex items-center">
++            <div class="bg-white px-3 py-1.5 rounded-2xl shadow-md flex items-center border border-white/30">
++              <img src="/images/logo.jpg" alt="OficiosYa" class="h-9 w-auto object-contain" />
++            </div>
++          </Link>
++          <nav class="flex items-center gap-3 sm:gap-4">
++            <Link :href="route('login')" class="px-4 py-2 text-sm font-semibold text-white/90 hover:text-white">Iniciar sesión</Link>
++            <Link :href="route('register')" class="px-5 py-2.5 text-sm font-bold text-principal bg-acento hover:bg-yellow-400 rounded-xl shadow-md">Registrarse</Link>
++          </nav>
++        </div>
++      </header>
++
++      <div class="py-10 max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 space-y-8">
++
++        <Link :href="route('servicios.index')" class="inline-flex items-center gap-1.5 text-xs font-bold text-principal hover:underline">
++          ← Volver al catálogo
++        </Link>
++
++        <!-- ============ ENCABEZADO ============ -->
++        <section class="bg-white rounded-3xl border-2 border-slate-200/90 shadow-md p-6 sm:p-8">
++          <div class="flex flex-col sm:flex-row gap-6">
++            <AvatarUsuario :nombre="prestador.nombre" :url="prestador.foto_url" clase="w-28 h-28 text-4xl" />
++
++            <div class="min-w-0 space-y-3">
++              <div class="flex flex-wrap items-center gap-2">
++                <h1 class="text-2xl sm:text-3xl font-extrabold text-principal tracking-tight">{{ prestador.nombre }}</h1>
++                <span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-green-50 border border-green-200 text-green-700 text-[11px] font-bold uppercase tracking-wider">
++                  <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="3" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" /></svg>
++                  Verificado
++                </span>
++                <span v-if="prestador.es_pro" class="px-2.5 py-1 rounded-full bg-acento/20 border border-acento/50 text-principal text-[11px] font-extrabold uppercase tracking-wider">Pro</span>
++              </div>
++
++              <p class="text-sm text-gris-medio">
++                <template v-if="prestador.ubicacion_aproximada">{{ prestador.ubicacion_aproximada }} · </template>
++                Atiende hasta {{ prestador.radio_cobertura_km }} km
++                <template v-if="desde"> · En OficiosYa desde {{ desde }}</template>
++              </p>
++
++              <div class="flex flex-wrap gap-x-6 gap-y-1 text-sm">
++                <span v-if="resumen.promedio !== null" class="font-bold text-principal">
++                  <span class="text-acento" aria-hidden="true">★</span> {{ resumen.promedio }}
++                  <span class="font-medium text-gris-medio">({{ resumen.total_resenas }} reseñas)</span>
++                </span>
++                <span v-else class="text-gris-medio">Aún sin reseñas</span>
++                <span class="text-gris-medio"><strong class="text-principal">{{ resumen.trabajos_confirmados }}</strong> trabajos confirmados</span>
++              </div>
++
++              <p v-if="prestador.descripcion" class="text-sm text-grafito leading-relaxed whitespace-pre-line">{{ prestador.descripcion }}</p>
++            </div>
++          </div>
++        </section>
++
++        <!-- ============ PORTAFOLIO ============ -->
++        <section v-if="galeria.length" class="space-y-4">
++          <h2 class="text-lg font-extrabold text-principal">Trabajos realizados</h2>
++          <GaleriaFotos :fotos="galeria" />
++        </section>
++
++        <!-- ============ SERVICIOS ============ -->
++        <section class="space-y-4">
++          <h2 class="text-lg font-extrabold text-principal">Servicios</h2>
++
++          <p v-if="!servicios.length" class="text-sm text-gris-medio">Este prestador no tiene servicios publicados por ahora.</p>
++
++          <div v-else class="grid grid-cols-1 md:grid-cols-2 gap-5">
++            <article v-for="s in servicios" :key="s.id" class="bg-white rounded-2xl border-2 border-slate-200/90 shadow-sm overflow-hidden flex flex-col">
++              <div v-if="s.portada" class="aspect-[16/9] bg-niebla">
++                <img :src="s.portada" :alt="s.titulo" loading="lazy" class="w-full h-full object-cover" />
++              </div>
++              <div class="p-5 space-y-2 flex-1">
++                <div class="flex items-center justify-between gap-2">
++                  <span class="text-[11px] font-bold uppercase tracking-wider text-principal bg-niebla px-3 py-1 rounded-full truncate">{{ s.categoria || 'General' }}</span>
++                  <span v-if="s.precio_base !== null" class="shrink-0 text-sm font-extrabold text-principal bg-acento/20 border border-acento/50 px-3 py-1 rounded-full">${{ s.precio_base }}</span>
++                </div>
++                <h3 class="text-base font-extrabold text-principal">{{ s.titulo }}</h3>
++                <p class="text-sm text-gris-medio leading-relaxed line-clamp-3">{{ s.descripcion }}</p>
++              </div>
++              <div class="px-5 py-3 bg-niebla/40 border-t border-slate-200">
++                <Link
++                  :href="estaAutenticado ? route('dashboard') : route('login')"
++                  class="inline-flex items-center px-3.5 py-2 text-xs font-bold rounded-xl shadow-sm"
++                  :class="estaAutenticado ? 'bg-principal text-white hover:bg-slate-800' : 'bg-acento text-principal hover:bg-yellow-400'"
++                >
++                  {{ estaAutenticado ? 'Solicitar desde mi panel' : 'Inicia sesión para solicitar' }}
++                </Link>
++              </div>
++            </article>
++          </div>
++        </section>
++
++        <!-- ============ RESEÑAS ============ -->
++        <section v-if="resenas.length" class="space-y-4">
++          <h2 class="text-lg font-extrabold text-principal">Reseñas de clientes</h2>
++          <ul class="space-y-3">
++            <li v-for="r in resenas" :key="r.id" class="bg-white rounded-2xl border border-slate-200 p-4">
++              <div class="flex items-center justify-between gap-3">
++                <span class="text-sm font-bold text-principal">{{ r.autor }}</span>
++                <span class="text-acento text-sm tracking-wider" :aria-label="`${r.calificacion} de 5 estrellas`">{{ estrellas(r.calificacion) }}</span>
++              </div>
++              <p v-if="r.comentario" class="mt-1.5 text-sm text-grafito whitespace-pre-line">{{ r.comentario }}</p>
++            </li>
++          </ul>
++        </section>
++      </div>
++    </div>
++  </component>
++</template>
+diff --git a/resources/js/Pages/Profile/Edit.vue b/resources/js/Pages/Profile/Edit.vue
+index 5c42dff..5e855e7 100644
+--- a/resources/js/Pages/Profile/Edit.vue
++++ b/resources/js/Pages/Profile/Edit.vue
+@@ -4,6 +4,7 @@ import AuthenticatedLayout from '@/Layouts/AuthenticatedLayout.vue';
+ import DeleteUserForm from './Partials/DeleteUserForm.vue';
+ import UpdatePasswordForm from './Partials/UpdatePasswordForm.vue';
+ import UpdateProfileInformationForm from './Partials/UpdateProfileInformationForm.vue';
++import FotoPerfilForm from './Partials/FotoPerfilForm.vue';
+ import { Head, Link, usePage } from '@inertiajs/vue3';
+ 
+ defineProps({
+@@ -94,6 +95,11 @@ const iconos = {
+                 </Link>
+             </div>
+ 
++            <!-- ============ FOTO DE PERFIL ============ -->
++            <div class="bg-white rounded-3xl p-6 sm:p-8 border-2 border-slate-200/90 shadow-md">
++                <FotoPerfilForm />
++            </div>
++
+             <!-- ============ FORMULARIOS ============ -->
+             <div class="grid grid-cols-1 lg:grid-cols-2 gap-8 items-start">
+                 <div class="bg-white rounded-3xl p-6 sm:p-8 border-2 border-slate-200/90 shadow-md">
+diff --git a/resources/js/Pages/Profile/Partials/FotoPerfilForm.vue b/resources/js/Pages/Profile/Partials/FotoPerfilForm.vue
+new file mode 100644
+index 0000000..f8e6803
+--- /dev/null
++++ b/resources/js/Pages/Profile/Partials/FotoPerfilForm.vue
+@@ -0,0 +1,61 @@
++<script setup>
++import { computed, ref } from 'vue'
++import { router, usePage } from '@inertiajs/vue3'
++import AvatarUsuario from '@/Components/AvatarUsuario.vue'
++import SubidorFoto from '@/Components/SubidorFoto.vue'
++
++const page = usePage()
++const usuario = computed(() => page.props.auth?.user)
++
++const subiendo = ref(false)
++const error = ref('')
++
++const subir = (archivo) => {
++  subiendo.value = true
++  error.value = ''
++  router.post(
++    route('perfil.foto.store'),
++    { foto: archivo },
++    {
++      forceFormData: true,
++      preserveScroll: true,
++      onError: (e) => (error.value = e.foto || 'No se pudo subir la foto.'),
++      onFinish: () => (subiendo.value = false),
++    },
++  )
++}
++
++const quitar = () => {
++  if (!confirm('¿Quitar tu foto de perfil?')) return
++  router.delete(route('perfil.foto.destroy'), { preserveScroll: true })
++}
++</script>
++
++<template>
++  <section class="flex flex-col sm:flex-row sm:items-center gap-5">
++    <AvatarUsuario :nombre="usuario?.nombre" :url="usuario?.fotoUrl" clase="w-24 h-24 text-3xl" />
++
++    <div class="space-y-3">
++      <div>
++        <h2 class="text-base font-extrabold text-principal">Foto de perfil</h2>
++        <p class="text-xs text-gris-medio mt-0.5">
++          Una foto clara de tu rostro genera confianza. JPG, PNG o WebP.
++        </p>
++      </div>
++
++      <div class="flex flex-wrap gap-2">
++        <SubidorFoto :etiqueta="usuario?.fotoUrl ? 'Cambiar foto' : 'Subir foto'" :cargando="subiendo" @seleccionada="subir" />
++        <button
++          v-if="usuario?.fotoUrl"
++          type="button"
++          class="px-4 py-2.5 text-xs font-bold rounded-xl bg-white text-red-600 border-2 border-red-200 hover:border-red-300 transition active:scale-95"
++          @click="quitar"
++        >
++          Quitar
++        </button>
++      </div>
++
++      <p v-if="error" class="text-xs font-semibold text-red-600" role="alert">{{ error }}</p>
++    </div>
++  </section>
++</template>
+diff --git a/resources/js/Pages/Servicios/Index.vue b/resources/js/Pages/Servicios/Index.vue
+index ab0b733..b119b68 100644
+--- a/resources/js/Pages/Servicios/Index.vue
++++ b/resources/js/Pages/Servicios/Index.vue
+@@ -2,6 +2,7 @@
+ import { ref, watch, computed } from 'vue'
+ import { Head, Link, router, usePage } from '@inertiajs/vue3'
+ import AuthenticatedLayout from '@/Layouts/AuthenticatedLayout.vue'
++import AvatarUsuario from '@/Components/AvatarUsuario.vue'
+ import BuscadorUbicacion from '@/Components/BuscadorUbicacion.vue'
+ import MapaUbicacion from '@/Components/MapaUbicacion.vue'
+ import { useGeolocalizacion, redondear } from '@/composables/useGeolocalizacion'
+@@ -356,6 +357,27 @@ const iconos = {
+               :key="servicio.id"
+               class="bg-white rounded-2xl border-2 border-slate-200/90 shadow-md hover:shadow-2xl hover:border-principal/40 hover:-translate-y-1.5 transition-all duration-300 overflow-hidden flex flex-col justify-between"
+             >
++              <!-- Portada: primera foto del portafolio; lleva al perfil público del prestador -->
++              <Link
++                v-if="servicio.fotos?.length"
++                :href="route('prestadores.show', servicio.perfil_prestador.id)"
++                class="relative block aspect-[16/9] bg-niebla overflow-hidden"
++                :aria-label="`Ver trabajos de ${nombrePrestador(servicio)}`"
++              >
++                <img
++                  :src="servicio.fotos[0].url_miniatura"
++                  :alt="servicio.fotos[0].pie || servicio.titulo"
++                  loading="lazy"
++                  class="w-full h-full object-cover transition-transform duration-300 hover:scale-105"
++                />
++                <span
++                  v-if="servicio.fotos.length > 1"
++                  class="absolute bottom-2 right-2 px-2 py-0.5 rounded-full bg-black/60 text-white text-[11px] font-bold"
++                >
++                  {{ servicio.fotos.length }} fotos
++                </span>
++              </Link>
++
+               <div class="p-6 space-y-3">
+                 <div class="flex justify-between items-center gap-2">
+                   <span class="text-[11px] font-bold uppercase tracking-wider text-principal bg-niebla px-3 py-1 rounded-full border border-principal/15 truncate">
+@@ -390,12 +412,19 @@ const iconos = {
+ 
+               <div class="px-6 py-4 bg-niebla/40 border-t border-slate-200 flex items-center justify-between gap-3">
+                 <div class="flex items-center gap-2.5 min-w-0">
+-                  <div class="w-9 h-9 shrink-0 rounded-xl bg-gradient-to-br from-principal to-[#1d4a8a] text-white font-extrabold text-xs flex items-center justify-center shadow-sm">
+-                    {{ iniciales(nombrePrestador(servicio)) }}
+-                  </div>
++                  <AvatarUsuario
++                    :nombre="nombrePrestador(servicio)"
++                    :url="servicio.perfil_prestador?.user?.foto_url"
++                    clase="w-9 h-9 text-xs"
++                  />
+                   <div class="min-w-0">
+                     <p class="text-[11px] text-gris-medio leading-none">Por</p>
+-                    <p class="text-xs font-bold text-principal truncate mt-0.5">{{ nombrePrestador(servicio) }}</p>
++                    <Link
++                      :href="route('prestadores.show', servicio.perfil_prestador.id)"
++                      class="block text-xs font-bold text-principal truncate mt-0.5 hover:underline"
++                    >
++                      {{ nombrePrestador(servicio) }}
++                    </Link>
+                   </div>
+                 </div>
+ 
+diff --git a/resources/js/composables/useImagenes.js b/resources/js/composables/useImagenes.js
+new file mode 100644
+index 0000000..5eb1f7b
+--- /dev/null
++++ b/resources/js/composables/useImagenes.js
+@@ -0,0 +1,62 @@
++/**
++ * Compresión de imágenes en el navegador (PWA-11).
++ *
++ * Reduce la foto a un máximo de `ladoMax` px y la convierte a JPEG antes de subirla:
++ * ahorra datos móviles (el prestador suele tener poca señal) y evita los HEIC del iPhone.
++ * El servidor VUELVE a validar y re-codificar todo: esto es una comodidad, no una defensa.
++ */
++
++const cargarConImg = (archivo) =>
++    new Promise((resolve, reject) => {
++        const url = URL.createObjectURL(archivo)
++        const img = new Image()
++        img.onload = () => {
++            URL.revokeObjectURL(url)
++            resolve(img)
++        }
++        img.onerror = () => {
++            URL.revokeObjectURL(url)
++            reject(new Error('No pudimos abrir la imagen. Prueba con una foto JPG o PNG.'))
++        }
++        img.src = url
++    })
++
++const aBlob = (canvas, calidad) =>
++    new Promise((resolve) => canvas.toBlob((blob) => resolve(blob), 'image/jpeg', calidad))
++
++export async function comprimirImagen(archivo, { ladoMax = 1600, calidad = 0.82, maxMB = 5 } = {}) {
++    if (!archivo || !String(archivo.type).startsWith('image/')) {
++        throw new Error('El archivo seleccionado no es una imagen.')
++    }
++
++    // createImageBitmap respeta la orientación EXIF; si el navegador no soporta las
++    // opciones, <img> también la aplica por defecto en los navegadores modernos.
++    let origen
++    try {
++        origen = await createImageBitmap(archivo, { imageOrientation: 'from-image' })
++    } catch {
++        origen = await cargarConImg(archivo)
++    }
++
++    const ancho = origen.width
++    const alto = origen.height
++    const factor = Math.min(1, ladoMax / Math.max(ancho, alto))
++
++    const canvas = document.createElement('canvas')
++    canvas.width = Math.max(1, Math.round(ancho * factor))
++    canvas.height = Math.max(1, Math.round(alto * factor))
++
++    const ctx = canvas.getContext('2d')
++    ctx.fillStyle = '#ffffff' // PNG con transparencia: fondo blanco
++    ctx.fillRect(0, 0, canvas.width, canvas.height)
++    ctx.drawImage(origen, 0, 0, canvas.width, canvas.height)
++    if (typeof origen.close === 'function') origen.close()
++
++    let blob = await aBlob(canvas, calidad)
++    if (blob && blob.size > maxMB * 1024 * 1024) blob = await aBlob(canvas, 0.65)
++
++    if (!blob) throw new Error('No pudimos preparar la foto. Intenta con otra.')
++    if (blob.size > maxMB * 1024 * 1024) throw new Error(`La foto sigue pesando más de ${maxMB} MB. Prueba con otra.`)
++
++    return new File([blob], 'foto.jpg', { type: 'image/jpeg' })
++}
+diff --git a/resources/js/sw.js b/resources/js/sw.js
+index f8578d5..87ac166 100644
+--- a/resources/js/sw.js
++++ b/resources/js/sw.js
+@@ -85,6 +85,31 @@ self.addEventListener('notificationclick', (event) => {
+     );
+ });
+ 
++// --- Fotos --------------------------------------------------------------------
++// Evidencia de pedidos: son fotos privadas del interior de domicilios. NUNCA se guardan
++// en caché (un celular compartido no debe conservarlas). Va antes de la regla de imágenes.
++registerRoute(
++    ({ url }) => url.origin === self.location.origin && url.pathname.startsWith('/evidencias/'),
++    new NetworkOnly(),
++);
++
++// Fotos públicas (perfil y portafolio) servidas desde otro origen (Cloudflare R2): se muestran
++// al instante desde caché y se refrescan en segundo plano. Las URLs firmadas se excluyen.
++registerRoute(
++    ({ request, url }) =>
++        request.destination === 'image' &&
++        url.origin !== self.location.origin &&
++        /\.(webp|jpe?g|png)$/i.test(url.pathname) &&
++        !url.searchParams.has('X-Amz-Signature'),
++    new StaleWhileRevalidate({
++        cacheName: 'oficiosya-fotos',
++        plugins: [
++            new CacheableResponsePlugin({ statuses: [0, 200] }), // 0 = respuesta opaca (otro origen)
++            new ExpirationPlugin({ maxEntries: 120, maxAgeSeconds: 60 * 60 * 24 * 30 }),
++        ],
++    }),
++);
++
+ // --- PWA-03: Cache-First para estáticos ---------------------------------------
+ registerRoute(
+     ({ request, url }) =>
+diff --git a/routes/web.php b/routes/web.php
+index 39d4c4a..61b74b5 100644
+--- a/routes/web.php
++++ b/routes/web.php
+@@ -6,10 +6,14 @@
+ use App\Http\Controllers\Api\UbicacionController;
+ use App\Http\Controllers\CategoriaController;
+ use App\Http\Controllers\DashboardController;
++use App\Http\Controllers\FotoEvidenciaController;
++use App\Http\Controllers\FotoPerfilController;
++use App\Http\Controllers\FotoTrabajoController;
+ use App\Http\Controllers\PedidoController;
+ use App\Http\Controllers\PagoRetornoController;
+ use App\Http\Controllers\PagoWebController;
+ use App\Http\Controllers\PerfilPrestadorController;
++use App\Http\Controllers\PrestadorPublicoController;
+ use App\Http\Controllers\ProfileController;
+ use App\Http\Controllers\PushController;
+ use App\Http\Controllers\ResenaController;
+@@ -35,6 +39,11 @@
+ // Catálogo público de servicios
+ Route::get('/servicios', [ServicioController::class, 'index'])->name('servicios.index');
+ 
++// Perfil público del prestador (escaparate, RF-19): solo perfiles verificados.
++Route::get('/prestadores/{perfil}', [PrestadorPublicoController::class, 'show'])
++    ->whereNumber('perfil')
++    ->name('prestadores.show');
++
+ // --------------------------------------------------------------------------
+ // Dashboard Principal (Con Redirección Inteligente para Administradores)
+ // --------------------------------------------------------------------------
+@@ -83,6 +92,29 @@
+         ->middleware('throttle:20,1')
+         ->name('api.ubicacion');
+ 
++    // Foto de perfil (cliente o prestador)
++    Route::post('/perfil/foto', [FotoPerfilController::class, 'store'])
++        ->middleware('throttle:10,1')
++        ->name('perfil.foto.store');
++    Route::delete('/perfil/foto', [FotoPerfilController::class, 'destroy'])
++        ->name('perfil.foto.destroy');
++
++    // Evidencia fotográfica del pedido (privada; lectura por URL firmada tras autorizar)
++    Route::get('/pedidos/{pedido}/evidencias', [FotoEvidenciaController::class, 'index'])
++        ->whereNumber('pedido')
++        ->name('evidencias.index');
++    Route::post('/pedidos/{pedido}/evidencias', [FotoEvidenciaController::class, 'store'])
++        ->whereNumber('pedido')
++        ->middleware('throttle:20,1')
++        ->name('evidencias.store');
++    Route::get('/evidencias/{foto}/{version?}', [FotoEvidenciaController::class, 'ver'])
++        ->whereNumber('foto')
++        ->where('version', 'original|miniatura')
++        ->name('evidencias.ver');
++    Route::delete('/evidencias/{foto}', [FotoEvidenciaController::class, 'destroy'])
++        ->whereNumber('foto')
++        ->name('evidencias.destroy');
++
+     // Gestión de Pedidos y Estado
+     Route::post('/pedidos', [PedidoController::class, 'store'])->name('pedidos.store');
+     Route::patch('/pedidos/{pedido}/estado', [PedidoController::class, 'updateEstado'])->name('pedidos.updateEstado');
+@@ -103,6 +135,18 @@
+ 
+         Route::post('/servicios', [ServicioController::class, 'store'])->name('servicios.store');
+         Route::patch('/servicios/{servicio}/toggle', [ServicioController::class, 'toggleState'])->name('servicios.toggle');
++
++        // Portafolio: muestra de trabajos realizados de cada servicio
++        Route::post('/servicios/{servicio}/fotos', [FotoTrabajoController::class, 'store'])
++            ->whereNumber('servicio')
++            ->middleware('throttle:30,1')
++            ->name('servicios.fotos.store');
++        Route::patch('/fotos-trabajo/{foto}', [FotoTrabajoController::class, 'update'])
++            ->whereNumber('foto')
++            ->name('fotos-trabajo.update');
++        Route::delete('/fotos-trabajo/{foto}', [FotoTrabajoController::class, 'destroy'])
++            ->whereNumber('foto')
++            ->name('fotos-trabajo.destroy');
+     });
+ });
+ 
+diff --git a/tests/Feature/FotosTest.php b/tests/Feature/FotosTest.php
+new file mode 100644
+index 0000000..c2770c3
+--- /dev/null
++++ b/tests/Feature/FotosTest.php
+@@ -0,0 +1,431 @@
++<?php
++
++namespace Tests\Feature;
++
++use App\Models\Categoria;
++use App\Models\FotoEvidencia;
++use App\Models\FotoTrabajo;
++use App\Models\Pedido;
++use App\Models\PerfilPrestador;
++use App\Models\Servicio;
++use App\Models\User;
++use App\Services\AlmacenFotos;
++use Illuminate\Foundation\Testing\RefreshDatabase;
++use Illuminate\Http\UploadedFile;
++use Illuminate\Support\Facades\Storage;
++use Spatie\Permission\Models\Role;
++use Spatie\Permission\PermissionRegistrar;
++use Tests\TestCase;
++
++/**
++ * Fotos: perfil, portafolio (público) y evidencia de pedidos (privada).
++ * Usan los discos 'public' y 'local' falsos; no tocan Cloudflare R2.
++ */
++class FotosTest extends TestCase
++{
++    use RefreshDatabase;
++
++    protected function setUp(): void
++    {
++        parent::setUp();
++
++        app(PermissionRegistrar::class)->forgetCachedPermissions();
++        foreach (['cliente', 'prestador', 'mediador', 'superadmin'] as $rol) {
++            Role::firstOrCreate(['name' => $rol, 'guard_name' => 'web']);
++        }
++
++        Storage::fake('public');
++        Storage::fake('local');
++    }
++
++    private function foto(string $nombre = 'foto.jpg', int $ancho = 800, int $alto = 600): UploadedFile
++    {
++        return UploadedFile::fake()->image($nombre, $ancho, $alto);
++    }
++
++    /** @return array{0: User, 1: PerfilPrestador, 2: Servicio} */
++    private function prestador(string $estado = 'verificado'): array
++    {
++        $user = User::factory()->create();
++        $user->assignRole('prestador');
++
++        $perfil = PerfilPrestador::create(['user_id' => $user->id, 'estado_verificacion' => $estado]);
++        $categoria = Categoria::firstOrCreate(['nombre' => 'Plomería']);
++
++        $servicio = Servicio::create([
++            'perfil_prestador_id' => $perfil->id,
++            'categoria_id'        => $categoria->id,
++            'titulo'              => 'Cambio de llave mezcladora',
++            'descripcion'         => 'Incluye materiales.',
++            'precio_base'         => 450,
++            'activo'              => true,
++        ]);
++
++        return [$user, $perfil, $servicio];
++    }
++
++    private function pedido(Servicio $servicio, User $cliente, string $estado): Pedido
++    {
++        return Pedido::create([
++            'cliente_id'         => $cliente->id,
++            'servicio_id'        => $servicio->id,
++            'estado'             => $estado,
++            'direccion_servicio' => 'Calle 1 #23',
++            'fecha_programada'   => now()->addDay(),
++        ]);
++    }
++
++    private function cliente(): User
++    {
++        $user = User::factory()->create();
++        $user->assignRole('cliente');
++
++        return $user;
++    }
++
++    /* ------------------------------ foto de perfil ------------------------------ */
++
++    public function test_usuario_sube_foto_de_perfil_y_se_guarda_en_webp_con_miniatura(): void
++    {
++        $user = $this->cliente();
++
++        $this->actingAs($user)->post(route('perfil.foto.store'), ['foto' => $this->foto()])
++            ->assertSessionHasNoErrors();
++
++        $ruta = $user->fresh()->getAttributes()['foto_path'];
++
++        $this->assertStringStartsWith("perfiles/{$user->id}/", $ruta);
++        $this->assertStringEndsWith('.webp', $ruta);
++        Storage::disk('public')->assertExists($ruta);
++        Storage::disk('public')->assertExists(AlmacenFotos::miniaturaDe($ruta));
++
++        // El contenido guardado es WebP real, no el archivo original.
++        $this->assertSame(IMAGETYPE_WEBP, getimagesizefromstring(Storage::disk('public')->get($ruta))[2]);
++        $this->assertNotNull($user->fresh()->foto_url);
++    }
++
++    public function test_reemplazar_la_foto_borra_la_anterior(): void
++    {
++        $user = $this->cliente();
++
++        $this->actingAs($user)->post(route('perfil.foto.store'), ['foto' => $this->foto()]);
++        $primera = $user->fresh()->getAttributes()['foto_path'];
++
++        $this->actingAs($user)->post(route('perfil.foto.store'), ['foto' => $this->foto('otra.jpg')]);
++        $segunda = $user->fresh()->getAttributes()['foto_path'];
++
++        $this->assertNotSame($primera, $segunda);
++        Storage::disk('public')->assertMissing($primera);
++        Storage::disk('public')->assertExists($segunda);
++    }
++
++    public function test_rechaza_archivos_que_no_son_imagen_aunque_tengan_extension_jpg(): void
++    {
++        $user = $this->cliente();
++
++        $falso = UploadedFile::fake()->createWithContent('truco.jpg', '<?php echo "hola"; ?>');
++
++        $this->actingAs($user)->post(route('perfil.foto.store'), ['foto' => $falso])
++            ->assertSessionHasErrors('foto');
++
++        $this->assertNull($user->fresh()->getAttributes()['foto_path']);
++    }
++
++    public function test_rechaza_svg(): void
++    {
++        $user = $this->cliente();
++
++        $svg = UploadedFile::fake()->createWithContent('x.svg', '<svg xmlns="http://www.w3.org/2000/svg"></svg>');
++
++        $this->actingAs($user)->post(route('perfil.foto.store'), ['foto' => $svg])
++            ->assertSessionHasErrors('foto');
++    }
++
++    public function test_invitado_no_puede_subir_foto_de_perfil(): void
++    {
++        $this->post(route('perfil.foto.store'), ['foto' => $this->foto()])
++            ->assertRedirect(route('login'));
++    }
++
++    public function test_usuario_elimina_su_foto_de_perfil(): void
++    {
++        $user = $this->cliente();
++        $this->actingAs($user)->post(route('perfil.foto.store'), ['foto' => $this->foto()]);
++        $ruta = $user->fresh()->getAttributes()['foto_path'];
++
++        $this->actingAs($user)->delete(route('perfil.foto.destroy'))->assertSessionHasNoErrors();
++
++        $this->assertNull($user->fresh()->getAttributes()['foto_path']);
++        Storage::disk('public')->assertMissing($ruta);
++    }
++
++    /* -------------------------------- portafolio -------------------------------- */
++
++    public function test_prestador_verificado_agrega_foto_al_portafolio(): void
++    {
++        [$user, , $servicio] = $this->prestador();
++
++        $this->actingAs($user)
++            ->post(route('servicios.fotos.store', $servicio), ['foto' => $this->foto(), 'pie' => 'Baño terminado'])
++            ->assertSessionHasNoErrors();
++
++        $this->assertSame(1, $servicio->fotos()->count());
++        $this->assertSame('Baño terminado', $servicio->fotos()->first()->pie);
++    }
++
++    public function test_prestador_no_puede_subir_fotos_a_servicio_ajeno(): void
++    {
++        [$duenio, , $servicio] = $this->prestador();
++        [$otro] = $this->prestador();
++
++        $this->actingAs($otro)
++            ->post(route('servicios.fotos.store', $servicio), ['foto' => $this->foto()])
++            ->assertForbidden();
++
++        $this->assertSame(0, $servicio->fotos()->count());
++        $this->assertNotNull($duenio);
++    }
++
++    public function test_prestador_no_verificado_no_puede_subir_fotos(): void
++    {
++        [$user, , $servicio] = $this->prestador('pendiente');
++
++        $this->actingAs($user)
++            ->post(route('servicios.fotos.store', $servicio), ['foto' => $this->foto()])
++            ->assertForbidden();
++    }
++
++    public function test_cliente_no_puede_subir_fotos_de_portafolio(): void
++    {
++        [, , $servicio] = $this->prestador();
++
++        $this->actingAs($this->cliente())
++            ->post(route('servicios.fotos.store', $servicio), ['foto' => $this->foto()])
++            ->assertForbidden();
++    }
++
++    public function test_portafolio_respeta_el_maximo_por_servicio(): void
++    {
++        config(['marketplace.fotos.max_por_servicio' => 2]);
++        [$user, , $servicio] = $this->prestador();
++
++        foreach (range(1, 2) as $i) {
++            $this->actingAs($user)->post(route('servicios.fotos.store', $servicio), ['foto' => $this->foto("f{$i}.jpg")]);
++        }
++
++        $this->actingAs($user)
++            ->post(route('servicios.fotos.store', $servicio), ['foto' => $this->foto('f3.jpg')])
++            ->assertSessionHasErrors('foto');
++
++        $this->assertSame(2, $servicio->fotos()->count());
++    }
++
++    public function test_marcar_como_portada_reordena_el_portafolio(): void
++    {
++        [$user, , $servicio] = $this->prestador();
++
++        foreach (range(1, 3) as $i) {
++            $this->actingAs($user)->post(route('servicios.fotos.store', $servicio), ['foto' => $this->foto("f{$i}.jpg")]);
++        }
++
++        $tercera = $servicio->fotos()->get()->last();
++
++        $this->actingAs($user)->patch(route('fotos-trabajo.update', $tercera), ['portada' => true]);
++
++        $this->assertSame($tercera->id, $servicio->fresh()->fotos()->first()->id);
++    }
++
++    public function test_eliminar_foto_de_portafolio_borra_los_archivos(): void
++    {
++        [$user, , $servicio] = $this->prestador();
++        $this->actingAs($user)->post(route('servicios.fotos.store', $servicio), ['foto' => $this->foto()]);
++
++        $foto = $servicio->fotos()->first();
++        $ruta = $foto->getAttributes()['ruta'];
++
++        $this->actingAs($user)->delete(route('fotos-trabajo.destroy', $foto))->assertSessionHasNoErrors();
++
++        $this->assertDatabaseMissing('fotos_trabajo', ['id' => $foto->id]);
++        Storage::disk('public')->assertMissing($ruta);
++        Storage::disk('public')->assertMissing(AlmacenFotos::miniaturaDe($ruta));
++    }
++
++    public function test_otro_prestador_no_puede_borrar_foto_ajena(): void
++    {
++        [$duenio, , $servicio] = $this->prestador();
++        [$otro] = $this->prestador();
++        $this->actingAs($duenio)->post(route('servicios.fotos.store', $servicio), ['foto' => $this->foto()]);
++
++        $this->actingAs($otro)
++            ->delete(route('fotos-trabajo.destroy', $servicio->fotos()->first()))
++            ->assertForbidden();
++    }
++
++    /* --------------------------- perfil público y catálogo --------------------------- */
++
++    public function test_perfil_publico_muestra_el_portafolio_y_no_filtra_rutas_ni_correo(): void
++    {
++        [$user, $perfil, $servicio] = $this->prestador();
++        $this->actingAs($user)->post(route('servicios.fotos.store', $servicio), ['foto' => $this->foto()]);
++
++        $respuesta = $this->get(route('prestadores.show', $perfil))->assertOk();
++
++        $this->assertCount(1, $respuesta->viewData('page')['props']['galeria']);
++
++        $json = json_encode($respuesta->viewData('page')['props']);
++        $this->assertStringNotContainsString($user->email, $json);
++        $this->assertStringNotContainsString('hash_sha256', $json);
++    }
++
++    public function test_perfil_publico_de_prestador_no_verificado_da_404(): void
++    {
++        [, $perfil] = $this->prestador('pendiente');
++
++        $this->get(route('prestadores.show', $perfil))->assertNotFound();
++    }
++
++    public function test_catalogo_incluye_las_fotos_del_servicio(): void
++    {
++        [$user, , $servicio] = $this->prestador();
++        $this->actingAs($user)->post(route('servicios.fotos.store', $servicio), ['foto' => $this->foto()]);
++
++        $props = $this->get(route('servicios.index'))->assertOk()->viewData('page')['props'];
++
++        $this->assertCount(1, $props['servicios']['data'][0]['fotos']);
++    }
++
++    /* --------------------------- evidencia de pedidos (privada) --------------------------- */
++
++    public function test_prestador_sube_evidencia_en_progreso_y_queda_en_disco_privado_con_auditoria(): void
++    {
++        [$prestador, , $servicio] = $this->prestador();
++        $pedido = $this->pedido($servicio, $this->cliente(), Pedido::EN_PROGRESO);
++
++        $this->actingAs($prestador)
++            ->post(route('evidencias.store', $pedido), ['foto' => $this->foto(), 'fase' => 'antes'])
++            ->assertCreated();
++
++        $evidencia = FotoEvidencia::first();
++
++        Storage::disk('local')->assertExists($evidencia->getAttributes()['ruta']);
++        Storage::disk('public')->assertMissing($evidencia->getAttributes()['ruta']);
++        $this->assertDatabaseHas('log_auditoria', ['accion' => 'evidencia.subida', 'entidad_id' => $pedido->id]);
++    }
++
++    public function test_no_se_puede_subir_evidencia_si_el_estado_no_lo_permite(): void
++    {
++        [$prestador, , $servicio] = $this->prestador();
++        $pedido = $this->pedido($servicio, $this->cliente(), Pedido::PENDIENTE);
++
++        $this->actingAs($prestador)
++            ->post(route('evidencias.store', $pedido), ['foto' => $this->foto(), 'fase' => 'antes'])
++            ->assertForbidden();
++    }
++
++    public function test_cliente_solo_aporta_evidencia_cuando_el_trabajo_esta_completado(): void
++    {
++        [, , $servicio] = $this->prestador();
++        $cliente = $this->cliente();
++
++        $enCurso = $this->pedido($servicio, $cliente, Pedido::EN_PROGRESO);
++        $this->actingAs($cliente)
++            ->post(route('evidencias.store', $enCurso), ['foto' => $this->foto(), 'fase' => 'despues'])
++            ->assertForbidden();
++
++        $completado = $this->pedido($servicio, $cliente, Pedido::COMPLETADO);
++        $this->actingAs($cliente)
++            ->post(route('evidencias.store', $completado), ['foto' => $this->foto(), 'fase' => 'despues'])
++            ->assertCreated();
++    }
++
++    public function test_un_tercero_no_puede_ver_ni_listar_la_evidencia(): void
++    {
++        [$prestador, , $servicio] = $this->prestador();
++        $pedido = $this->pedido($servicio, $this->cliente(), Pedido::EN_PROGRESO);
++        $this->actingAs($prestador)->post(route('evidencias.store', $pedido), ['foto' => $this->foto(), 'fase' => 'antes']);
++
++        $intruso = $this->cliente();
++        $foto    = FotoEvidencia::first();
++
++        $this->actingAs($intruso)->getJson(route('evidencias.index', $pedido))->assertForbidden();
++        $this->actingAs($intruso)->get(route('evidencias.ver', $foto))->assertForbidden();
++    }
++
++    public function test_las_partes_ven_la_evidencia_por_redireccion_a_url_firmada_sin_cache(): void
++    {
++        [$prestador, , $servicio] = $this->prestador();
++        $cliente = $this->cliente();
++        $pedido  = $this->pedido($servicio, $cliente, Pedido::EN_PROGRESO);
++        $this->actingAs($prestador)->post(route('evidencias.store', $pedido), ['foto' => $this->foto(), 'fase' => 'antes']);
++
++        $foto = FotoEvidencia::first();
++
++        $this->actingAs($cliente)->get(route('evidencias.ver', $foto))
++            ->assertRedirect()
++            ->assertHeader('Cache-Control');
++
++        $lista = $this->actingAs($cliente)->getJson(route('evidencias.index', $pedido))->assertOk();
++        $this->assertCount(1, $lista->json('fotos'));
++        $this->assertArrayNotHasKey('ruta', $lista->json('fotos.0'));
++    }
++
++    public function test_mediador_solo_ve_evidencia_en_disputa_y_deja_rastro(): void
++    {
++        [$prestador, , $servicio] = $this->prestador();
++        $cliente = $this->cliente();
++        $pedido  = $this->pedido($servicio, $cliente, Pedido::EN_PROGRESO);
++        $this->actingAs($prestador)->post(route('evidencias.store', $pedido), ['foto' => $this->foto(), 'fase' => 'antes']);
++        $foto = FotoEvidencia::first();
++
++        $mediador = User::factory()->create();
++        $mediador->assignRole('mediador');
++
++        $this->actingAs($mediador)->get(route('evidencias.ver', $foto))->assertForbidden();
++
++        $pedido->update(['estado' => Pedido::EN_DISPUTA]);
++
++        $this->actingAs($mediador)->get(route('evidencias.ver', $foto))->assertRedirect();
++        $this->assertDatabaseHas('log_auditoria', ['accion' => 'evidencia.consultada', 'entidad_id' => $pedido->id]);
++    }
++
++    public function test_solo_el_autor_elimina_su_evidencia_y_no_en_disputa(): void
++    {
++        [$prestador, , $servicio] = $this->prestador();
++        $cliente = $this->cliente();
++        $pedido  = $this->pedido($servicio, $cliente, Pedido::COMPLETADO);
++        $this->actingAs($prestador)->post(route('evidencias.store', $pedido), ['foto' => $this->foto(), 'fase' => 'despues']);
++        $foto = FotoEvidencia::first();
++
++        $this->actingAs($cliente)->delete(route('evidencias.destroy', $foto))->assertForbidden();
++
++        $pedido->update(['estado' => Pedido::EN_DISPUTA]);
++        $this->actingAs($prestador)->delete(route('evidencias.destroy', $foto))->assertForbidden();
++
++        $pedido->update(['estado' => Pedido::COMPLETADO]);
++        $this->actingAs($prestador)->delete(route('evidencias.destroy', $foto))->assertNoContent();
++
++        $this->assertSame(0, FotoEvidencia::count());
++    }
++
++    public function test_evidencia_respeta_el_maximo_por_persona(): void
++    {
++        config(['marketplace.fotos.max_evidencias_por_parte' => 1]);
++        [$prestador, , $servicio] = $this->prestador();
++        $pedido = $this->pedido($servicio, $this->cliente(), Pedido::EN_PROGRESO);
++
++        $this->actingAs($prestador)->post(route('evidencias.store', $pedido), ['foto' => $this->foto(), 'fase' => 'antes'])->assertCreated();
++
++        $this->actingAs($prestador)
++            ->postJson(route('evidencias.store', $pedido), ['foto' => $this->foto('b.jpg'), 'fase' => 'durante'])
++            ->assertStatus(422);
++    }
++
++    public function test_fotos_de_portafolio_son_independientes_de_las_de_evidencia(): void
++    {
++        [$user, , $servicio] = $this->prestador();
++        $this->actingAs($user)->post(route('servicios.fotos.store', $servicio), ['foto' => $this->foto()]);
++
++        $this->assertSame(1, FotoTrabajo::count());
++        $this->assertSame(0, FotoEvidencia::count());
++    }
++}
+diff --git a/tests/Feature/ProfileTest.php b/tests/Feature/ProfileTest.php
+index 49886c3..f9a7d1d 100644
+--- a/tests/Feature/ProfileTest.php
++++ b/tests/Feature/ProfileTest.php
+@@ -28,7 +28,7 @@ public function test_profile_information_can_be_updated(): void
+         $response = $this
+             ->actingAs($user)
+             ->patch('/profile', [
+-                'name' => 'Test User',
++                'nombre' => 'Test User',
+                 'email' => 'test@example.com',
+             ]);
+ 
+@@ -38,7 +38,7 @@ public function test_profile_information_can_be_updated(): void
+ 
+         $user->refresh();
+ 
+-        $this->assertSame('Test User', $user->name);
++        $this->assertSame('Test User', $user->nombre);
+         $this->assertSame('test@example.com', $user->email);
+         $this->assertNull($user->email_verified_at);
+     }
+@@ -50,7 +50,7 @@ public function test_email_verification_status_is_unchanged_when_the_email_addre
+         $response = $this
+             ->actingAs($user)
+             ->patch('/profile', [
+-                'name' => 'Test User',
++                'nombre' => 'Test User',
+                 'email' => $user->email,
+             ]);
+ 

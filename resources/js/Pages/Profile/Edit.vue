@@ -4,6 +4,7 @@ import AuthenticatedLayout from '@/Layouts/AuthenticatedLayout.vue';
 import DeleteUserForm from './Partials/DeleteUserForm.vue';
 import UpdatePasswordForm from './Partials/UpdatePasswordForm.vue';
 import UpdateProfileInformationForm from './Partials/UpdateProfileInformationForm.vue';
+import FotoPerfilForm from './Partials/FotoPerfilForm.vue';
 import { Head, Link, usePage } from '@inertiajs/vue3';
 
 defineProps({
@@ -92,6 +93,11 @@ const iconos = {
                         <path stroke-linecap="round" stroke-linejoin="round" :d="iconos.flecha" />
                     </svg>
                 </Link>
+            </div>
+
+            <!-- ============ FOTO DE PERFIL ============ -->
+            <div class="bg-white rounded-3xl p-6 sm:p-8 border-2 border-slate-200/90 shadow-md">
+                <FotoPerfilForm />
             </div>
 
             <!-- ============ FORMULARIOS ============ -->

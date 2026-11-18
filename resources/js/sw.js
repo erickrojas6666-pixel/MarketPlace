@@ -85,6 +85,31 @@ self.addEventListener('notificationclick', (event) => {
     );
 });
 
+// --- Fotos --------------------------------------------------------------------
+// Evidencia de pedidos: son fotos privadas del interior de domicilios. NUNCA se guardan
+// en caché (un celular compartido no debe conservarlas). Va antes de la regla de imágenes.
+registerRoute(
+    ({ url }) => url.origin === self.location.origin && url.pathname.startsWith('/evidencias/'),
+    new NetworkOnly(),
+);
+
+// Fotos públicas (perfil y portafolio) servidas desde otro origen (Cloudflare R2): se muestran
+// al instante desde caché y se refrescan en segundo plano. Las URLs firmadas se excluyen.
+registerRoute(
+    ({ request, url }) =>
+        request.destination === 'image' &&
+        url.origin !== self.location.origin &&
+        /\.(webp|jpe?g|png)$/i.test(url.pathname) &&
+        !url.searchParams.has('X-Amz-Signature'),
+    new StaleWhileRevalidate({
+        cacheName: 'oficiosya-fotos',
+        plugins: [
+            new CacheableResponsePlugin({ statuses: [0, 200] }), // 0 = respuesta opaca (otro origen)
+            new ExpirationPlugin({ maxEntries: 120, maxAgeSeconds: 60 * 60 * 24 * 30 }),
+        ],
+    }),
+);
+
 // --- PWA-03: Cache-First para estáticos ---------------------------------------
 registerRoute(
     ({ request, url }) =>

@@ -3,6 +3,8 @@
 namespace App\Http\Controllers;
 
 use App\Http\Requests\ProfileUpdateRequest;
+use App\Models\FotoTrabajo;
+use App\Services\AlmacenFotos;
 use Illuminate\Contracts\Auth\MustVerifyEmail;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -51,9 +53,25 @@ class ProfileController extends Controller
 
         $user = $request->user();
 
+        // Los archivos públicos no se borran con la fila (la BD solo elimina en cascada
+        // los registros): se limpian aquí. La evidencia de pedidos se conserva a propósito.
+        $almacen = app(AlmacenFotos::class);
+        $rutas   = FotoTrabajo::query()
+            ->whereIn('servicio_id', fn ($q) => $q->select('servicios.id')
+                ->from('servicios')
+                ->join('perfiles_prestador', 'perfiles_prestador.id', '=', 'servicios.perfil_prestador_id')
+                ->where('perfiles_prestador.user_id', $user->id))
+            ->get()
+            ->map(fn (FotoTrabajo $f) => $f->getAttributes()['ruta'])
+            ->all();
+
+        $rutas[] = $user->getAttributes()['foto_path'] ?? null;
+
         Auth::logout();
 
         $user->delete();
+
+        $almacen->borrar($almacen->discoPublico(), $rutas);
 
         $request->session()->invalidate();
         $request->session()->regenerateToken();

@@ -60,6 +60,34 @@ return [
             'report' => false,
         ],
 
+        // Cloudflare R2 (compatible con S3). Dos buckets: uno público (foto de perfil y
+        // portafolio) y uno privado (evidencia de pedidos). R2 no admite ACL por objeto,
+        // por eso aquí NO se define 'visibility': lo público/privado lo da el bucket.
+        'r2_publico' => [
+            'driver' => 's3',
+            'key' => env('R2_ACCESS_KEY_ID'),
+            'secret' => env('R2_SECRET_ACCESS_KEY'),
+            'region' => 'auto',
+            'bucket' => env('R2_BUCKET_PUBLICO'),
+            'url' => env('R2_URL_PUBLICA'),
+            'endpoint' => env('R2_ENDPOINT'),
+            'use_path_style_endpoint' => true,
+            'throw' => true,
+            'report' => false,
+        ],
+
+        'r2_privado' => [
+            'driver' => 's3',
+            'key' => env('R2_ACCESS_KEY_ID'),
+            'secret' => env('R2_SECRET_ACCESS_KEY'),
+            'region' => 'auto',
+            'bucket' => env('R2_BUCKET_PRIVADO'),
+            'endpoint' => env('R2_ENDPOINT'),
+            'use_path_style_endpoint' => true,
+            'throw' => true,
+            'report' => false,
+        ],
+
     ],
 
     /*

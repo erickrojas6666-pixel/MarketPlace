@@ -4,12 +4,14 @@ import { Head, useForm, router } from '@inertiajs/vue3'
 import AuthenticatedLayout from '@/Layouts/AuthenticatedLayout.vue'
 import BuscadorUbicacion from '@/Components/BuscadorUbicacion.vue'
 import MapaUbicacion from '@/Components/MapaUbicacion.vue'
+import PortafolioServicio from '@/Components/PortafolioServicio.vue'
 import { useGeolocalizacion, redondear } from '@/composables/useGeolocalizacion'
 
 const props = defineProps({
   perfil: Object,
   categorias: { type: Array, default: () => [] },
   serviciosPropios: { type: Array, default: () => [] },
+  maxFotosServicio: { type: Number, default: 8 },
 })
 
 // Formulario del perfil
@@ -390,6 +392,32 @@ const iconos = {
           </form>
         </div>
       </div>
+
+      <!-- ============ PORTAFOLIO DE FOTOS ============ -->
+      <section v-if="serviciosPropios.length" class="space-y-5">
+        <div class="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 class="text-xl font-extrabold text-principal tracking-tight">Fotos de tus servicios</h2>
+            <p class="text-xs text-gris-medio mt-0.5">La primera foto de cada servicio es la portada que ven los clientes en el catálogo.</p>
+          </div>
+          <a
+            v-if="estaVerificado"
+            :href="route('prestadores.show', perfil.id)"
+            class="text-xs font-bold text-principal hover:underline"
+          >
+            Ver mi perfil público →
+          </a>
+        </div>
+
+        <div
+          v-for="s in serviciosPropios"
+          :key="s.id"
+          class="bg-white rounded-3xl p-6 border-2 border-slate-200/90 shadow-md space-y-4"
+        >
+          <h3 class="text-base font-extrabold text-principal">{{ s.titulo }}</h3>
+          <PortafolioServicio :servicio="s" :max="maxFotosServicio" />
+        </div>
+      </section>
     </div>
   </AuthenticatedLayout>
 </template>

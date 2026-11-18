@@ -25,6 +25,11 @@ class ServicioResource extends JsonResource
             'prestador' => [
                 'nombre' => $this->perfilPrestador?->user?->nombre,
             ],
+            'fotos' => $this->whenLoaded('fotos', fn () => $this->fotos->map(fn ($f) => [
+                'url'           => $f->url,
+                'url_miniatura' => $f->url_miniatura,
+                'pie'           => $f->pie,
+            ])->values()),
             'calificacion_promedio' => $promedio !== null ? round((float) $promedio, 1) : null,
             'resenas_count'         => (int) ($this->resource->getAttribute('resenas_count') ?? 0),
             'niveles'               => $this->whenLoaded('niveles', fn () => $this->niveles->map(fn ($n) => [
