@@ -64,6 +64,14 @@ const claseEnlace = (activo) => [
                 >
                   Perfil Prestador
                 </Link>
+
+                <Link
+                  v-if="esPrestador"
+                  :href="route('prestador.verificacion.show')"
+                  :class="claseEnlace(route().current('prestador.verificacion.show'))"
+                >
+                  Verificación
+                </Link>
               </div>
             </div>
 
@@ -103,6 +111,10 @@ const claseEnlace = (activo) => [
                   <template #content>
                     <DropdownLink v-if="esPrestador" :href="route('prestador.perfil.edit')">
                       Perfil de Prestador
+                    </DropdownLink>
+
+                    <DropdownLink v-if="esPrestador" :href="route('prestador.verificacion.show')">
+                      Verificación de identidad
                     </DropdownLink>
 
                     <DropdownLink :href="route('profile.edit')">
@@ -203,6 +215,9 @@ const claseEnlace = (activo) => [
             <div class="mt-3 space-y-1">
               <ResponsiveNavLink v-if="esPrestador" :href="route('prestador.perfil.edit')" :active="route().current('prestador.perfil.edit')">
                 Mi Perfil de Prestador / Servicios
+              </ResponsiveNavLink>
+              <ResponsiveNavLink v-if="esPrestador" :href="route('prestador.verificacion.show')" :active="route().current('prestador.verificacion.show')">
+                Verificación de identidad
               </ResponsiveNavLink>
               <ResponsiveNavLink :href="route('profile.edit')">
                 Ajustes de Cuenta

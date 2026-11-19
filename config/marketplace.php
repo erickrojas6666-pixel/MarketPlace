@@ -33,6 +33,15 @@ return [
         'minutos_url_privada'      => 5,
     ],
 
+    // Verificación de identidad (RF-05 a RF-08). Los documentos van cifrados en el disco privado.
+    'verificacion' => [
+        'tipos_requeridos'       => ['ine_frente', 'ine_reverso', 'comprobante_domicilio'],
+        'lado_max'               => 2000,   // px: la INE debe seguir legible
+        'exigir_documentos'      => (bool) env('VERIFICACION_EXIGIR_DOCUMENTOS', true),
+        'retencion_dias'         => (int) env('VERIFICACION_RETENCION_DIAS', 180),
+        'minutos_acceso_revisor' => 15,
+    ],
+
     // Interruptores de módulos (ver TransicionesPedido::mapa()).
     'cotizaciones_habilitadas' => (bool) env('MARKETPLACE_COTIZACIONES', false),
     'escrow_habilitado'        => (bool) env('MARKETPLACE_ESCROW', false),

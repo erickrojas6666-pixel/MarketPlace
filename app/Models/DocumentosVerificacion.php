@@ -37,9 +37,12 @@ class DocumentosVerificacion extends Model
         'estado',
         'revisado_por',
         'vence_en',
+        'motivo',
+        'purgado_at',
     ];
 
     protected $casts = [
+        'purgado_at'   => 'datetime',
         'perfil_id'    => 'integer',
         'revisado_por' => 'integer',
         'vence_en'     => 'date',

@@ -35,7 +35,7 @@ class EstadoVerificacionNotification extends Notification
         // Mapeo adaptado al ENUM físico de MySQL ('verificado', 'rechazado', 'pendiente')
         $mensaje = match ($estado) {
             'verificado', 'aprobado' => '¡Felicidades! Tu perfil de prestador ha sido verificado. Ya puedes ofrecer tus servicios en la plataforma.',
-            'rechazado'             => 'Lamentablemente tu solicitud de verificación de prestador ha sido rechazada.',
+            'rechazado'             => 'Tu solicitud de verificación fue rechazada.'.($this->perfil->motivo_rechazo ? ' Motivo: '.$this->perfil->motivo_rechazo : '').' Corrige tus documentos y vuelve a enviarlos.',
             default                 => 'El estado de tu solicitud de verificación ha cambiado a: ' . $estado,
         };
 

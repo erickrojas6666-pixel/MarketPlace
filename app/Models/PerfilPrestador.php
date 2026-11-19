@@ -56,6 +56,7 @@ class PerfilPrestador extends Model
         'radio_cobertura_km',
         'estado_verificacion',
         'motivo_rechazo',
+        'verificacion_enviada_at',
     ];
 
     protected $casts = [
@@ -64,11 +65,32 @@ class PerfilPrestador extends Model
         'latitud'            => 'float',
         'longitud'           => 'float',
         'radio_cobertura_km' => 'integer',
+        'verificacion_enviada_at' => 'datetime',
     ];
 
     public function estaVerificado(): bool
     {
         return $this->estado_verificacion === self::ESTADO_VERIFICADO;
+    }
+
+    /** RF-06: "en revisión" = envió sus documentos y aún no hay decisión. */
+    public function enRevision(): bool
+    {
+        return $this->estado_verificacion === self::ESTADO_PENDIENTE
+            && $this->verificacion_enviada_at !== null;
+    }
+
+    /** Estado que ve el prestador: pendiente | en_revision | verificado | rechazado. */
+    public function estadoVisible(): string
+    {
+        return $this->enRevision() ? 'en_revision' : (string) $this->estado_verificacion;
+    }
+
+    /** Solo se pueden cambiar documentos antes de enviar o tras un rechazo. */
+    public function puedeEditarDocumentos(): bool
+    {
+        return $this->estado_verificacion === self::ESTADO_RECHAZADO
+            || ($this->estado_verificacion === self::ESTADO_PENDIENTE && $this->verificacion_enviada_at === null);
     }
 
     public function tieneUbicacion(): bool

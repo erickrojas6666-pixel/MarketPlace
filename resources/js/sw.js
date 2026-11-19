@@ -86,10 +86,14 @@ self.addEventListener('notificationclick', (event) => {
 });
 
 // --- Fotos --------------------------------------------------------------------
-// Evidencia de pedidos: son fotos privadas del interior de domicilios. NUNCA se guardan
+// Evidencia de pedidos y documentos de identidad (INE, comprobante): NUNCA se guardan
 // en caché (un celular compartido no debe conservarlas). Va antes de la regla de imágenes.
 registerRoute(
-    ({ url }) => url.origin === self.location.origin && url.pathname.startsWith('/evidencias/'),
+    ({ url }) =>
+        url.origin === self.location.origin &&
+        (url.pathname.startsWith('/evidencias/') ||
+            url.pathname.startsWith('/admin/documentos/') ||
+            url.pathname.startsWith('/prestador/verificacion/documentos/')),
     new NetworkOnly(),
 );
 

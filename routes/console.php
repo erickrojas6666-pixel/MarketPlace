@@ -14,3 +14,10 @@ Schedule::command('pedidos:confirmar-automaticas')
     ->hourly()
     ->withoutOverlapping()
     ->onOneServer();
+
+
+// Retención de datos personales: elimina los archivos de INE/comprobantes ya resueltos tras el plazo.
+Schedule::command('verificacion:purgar-documentos')
+    ->dailyAt('03:30')
+    ->withoutOverlapping()
+    ->onOneServer();
