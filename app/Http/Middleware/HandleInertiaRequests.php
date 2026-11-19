@@ -2,12 +2,26 @@
 
 namespace App\Http\Middleware;
 
+use Closure;
 use Illuminate\Http\Request;
+use Inertia\Inertia;
 use Inertia\Middleware;
 
 class HandleInertiaRequests extends Middleware
 {
     protected $rootView = 'app';
+
+    /**
+     * Con sesión iniciada, Inertia cifra el historial del navegador (las props de cada
+     * página). Al cerrar sesión se invalida la clave (Inertia::clearHistory en el logout),
+     * así que el botón Atrás ya no puede mostrar páginas privadas.
+     */
+    public function handle(Request $request, Closure $next)
+    {
+        Inertia::encryptHistory($request->user() !== null);
+
+        return parent::handle($request, $next);
+    }
 
     public function version(Request $request): ?string
     {

@@ -23,6 +23,12 @@ createInertiaApp({
         // Inicializar Service Worker
         iniciarPwa();
 
+        // Si el navegador restaura una página desde su caché de atrás/adelante (bfcache),
+        // se recarga para que el servidor decida si todavía hay sesión.
+        window.addEventListener('pageshow', (evento) => {
+            if (evento.persisted) window.location.reload();
+        });
+
         // Datos locales (IndexedDB): ligados al usuario y borrados al cerrar sesión.
         let ultimoUsuario = null;
         const alCambiarUsuario = (id) => {
