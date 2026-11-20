@@ -242,7 +242,7 @@ const iconos = {
           </p>
 
           <!-- Tu punto de búsqueda y el radio (los prestadores nunca muestran su ubicación exacta) -->
-          <MapaUbicacion v-if="hayUbicacion" :lat="lat" :lng="lng" :radio-km="Number(radioKm)" altura="220px" />
+          <MapaUbicacion v-if="hayUbicacion" :lat="lat" :lng="lng" :radio-km="Number(radioKm)" altura="560px" />
 
           <p class="text-xs text-gris-medio flex items-center gap-1.5">
             <svg class="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
