@@ -14,8 +14,24 @@ const handleImageError = (e) => {
     }
 };
 
-/* ---------- Menú hamburguesa (móvil) ---------- */
+/* ---------- Menú lateral (móvil, sale por la derecha) ---------- */
 const menuAbierto = ref(false);
+const cerrarMenu = () => (menuAbierto.value = false);
+const alPresionarTecla = (e) => {
+    if (e.key === 'Escape') cerrarMenu();
+};
+
+const iconos = {
+    inicio: ['M3 12l9-9 9 9', 'M5 10v10a1 1 0 001 1h3v-6h6v6h3a1 1 0 001-1V10'],
+    entrar: ['M11 16l-4-4m0 0l4-4m-4 4h14m-5 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h7a3 3 0 013 3v1'],
+    registrar: ['M18 9v3m0 0v3m0-3h3m-3 0h-3m-2-5a4 4 0 11-8 0 4 4 0 018 0zM3 20a6 6 0 0112 0v1H3v-1z'],
+    cerrar: ['M6 18L18 6M6 6l12 12'],
+};
+
+const claseItemMovil =
+    'group flex w-full items-center gap-3 rounded-xl border border-slate-200/80 bg-white px-3 py-2.5 text-left text-sm font-bold text-principal shadow-sm transition-all duration-200 hover:border-principal/40 hover:shadow-md hover:-translate-y-0.5 active:bg-niebla active:scale-[0.98]';
+const claseCajaMovil =
+    'w-9 h-9 shrink-0 rounded-lg flex items-center justify-center bg-niebla text-principal transition-colors duration-200 group-hover:bg-principal group-hover:text-acento';
 
 /* ---------- Carrusel del hero ---------- */
 // Agrega aquí las rutas de las imágenes (están en public/images/carrusel).
@@ -50,6 +66,8 @@ const existe = (src) =>
     });
 
 onMounted(async () => {
+    window.addEventListener('keydown', alPresionarTecla);
+
     const resultados = await Promise.all(IMAGENES_CARRUSEL.map(existe));
     imagenes.value = mezclar(IMAGENES_CARRUSEL.filter((_, i) => resultados[i]));
 
@@ -62,6 +80,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
     clearInterval(temporizador);
+    window.removeEventListener('keydown', alPresionarTecla);
 });
 
 const categorias = [
@@ -142,69 +161,116 @@ const categorias = [
 
                         <Link
                             :href="route('register')"
-                            class="px-6 py-3 text-sm font-bold text-principal bg-acento hover:bg-yellow-400 rounded-xl shadow-md transition-all duration-200 hover:shadow-lg hover:-translate-y-0.5"
+                            class="px-6 py-3 text-sm font-bold text-principal bg-acento hover:bg-yellow-400 rounded-xl shadow-md transition-all duration-200 hover:shadow-lg hover:-translate-y-0.5 active:scale-95"
                         >
                             Registrarse
                         </Link>
                     </template>
                 </nav>
 
-                <!-- Hamburguesa (Móvil) -->
+                <!-- Botón hamburguesa (Móvil) -->
                 <button
                     type="button"
-                    @click="menuAbierto = !menuAbierto"
-                    class="sm:hidden inline-flex items-center justify-center rounded-xl p-2 text-white hover:bg-white/10 focus:outline-none transition"
+                    @click="menuAbierto = true"
+                    class="sm:hidden inline-flex items-center justify-center rounded-xl p-2 text-white hover:bg-white/10 active:bg-white/20 focus:outline-none transition"
                     :aria-expanded="menuAbierto"
                     aria-label="Abrir menú"
                 >
                     <svg class="h-7 w-7" stroke="currentColor" fill="none" viewBox="0 0 24 24">
-                        <path
-                            v-if="!menuAbierto"
-                            stroke-linecap="round"
-                            stroke-linejoin="round"
-                            stroke-width="2"
-                            d="M4 6h16M4 12h16M4 18h16"
-                        />
-                        <path
-                            v-else
-                            stroke-linecap="round"
-                            stroke-linejoin="round"
-                            stroke-width="2"
-                            d="M6 18L18 6M6 6l12 12"
-                        />
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
                     </svg>
                 </button>
             </div>
-
-            <!-- Menú desplegable (Móvil) -->
-            <div v-show="menuAbierto" class="sm:hidden bg-white border-t border-slate-200 shadow-lg">
-                <div class="px-4 py-4 space-y-3">
-                    <Link
-                        v-if="$page.props.auth.user"
-                        :href="route('dashboard')"
-                        class="block w-full text-center px-4 py-3 text-sm font-bold text-white bg-principal hover:bg-slate-800 rounded-xl shadow-md transition-all duration-200"
-                    >
-                        Mi Panel
-                    </Link>
-
-                    <template v-else>
-                        <Link
-                            :href="route('login')"
-                            class="block w-full text-center px-4 py-3 text-sm font-bold text-principal bg-white hover:bg-niebla rounded-xl border-2 border-slate-200 transition-all duration-200"
-                        >
-                            Iniciar sesión
-                        </Link>
-
-                        <Link
-                            :href="route('register')"
-                            class="block w-full text-center px-4 py-3 text-sm font-bold text-principal bg-acento hover:bg-yellow-400 rounded-xl shadow-md transition-all duration-200"
-                        >
-                            Registrarse
-                        </Link>
-                    </template>
-                </div>
-            </div>
         </header>
+
+        <!-- ============ PANEL LATERAL (MÓVIL, sale por la derecha) ============ -->
+        <Transition
+            enter-active-class="transition-opacity duration-300"
+            enter-from-class="opacity-0"
+            leave-active-class="transition-opacity duration-200"
+            leave-to-class="opacity-0"
+        >
+            <div
+                v-if="menuAbierto"
+                class="fixed inset-0 z-[60] bg-principal/60 backdrop-blur-sm sm:hidden"
+                @click="cerrarMenu"
+            ></div>
+        </Transition>
+
+        <Transition
+            enter-active-class="transition-transform duration-300 ease-out"
+            enter-from-class="translate-x-full"
+            leave-active-class="transition-transform duration-200 ease-in"
+            leave-to-class="translate-x-full"
+        >
+            <aside
+                v-if="menuAbierto"
+                class="fixed inset-y-0 right-0 z-[70] w-80 max-w-[85%] bg-gradient-to-b from-niebla to-[#eaf0f8] shadow-2xl flex flex-col sm:hidden"
+                role="dialog"
+                aria-modal="true"
+                aria-label="Menú de navegación"
+            >
+                <!-- Encabezado: logo + cerrar (mismo azul de la navbar) -->
+                <div class="flex items-center justify-between px-4 h-20 bg-principal border-b border-principal/20 shadow-md shrink-0">
+                    <div class="bg-white px-3 py-1.5 rounded-2xl shadow-md flex items-center border border-white/30">
+                        <img src="/images/logo.jpg" @error="handleImageError" alt="OficiosYa" class="h-9 w-auto object-contain" />
+                    </div>
+                    <button
+                        type="button"
+                        @click="cerrarMenu"
+                        class="w-10 h-10 rounded-xl flex items-center justify-center text-white bg-white/10 border border-white/20 hover:bg-white/20 active:scale-95 transition-all duration-200"
+                        aria-label="Cerrar menú"
+                    >
+                        <svg class="w-6 h-6" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                            <path v-for="(d, i) in iconos.cerrar" :key="i" stroke-linecap="round" stroke-linejoin="round" :d="d" />
+                        </svg>
+                    </button>
+                </div>
+
+                <div class="flex-1 overflow-y-auto px-3 py-4">
+                    <p class="px-1 mb-2 text-[11px] font-extrabold uppercase tracking-wider text-gris-medio">
+                        {{ $page.props.auth.user ? 'Mi cuenta' : 'Acceso' }}
+                    </p>
+
+                    <nav class="space-y-2">
+                        <Link v-if="$page.props.auth.user" :href="route('dashboard')" :class="claseItemMovil" @click="cerrarMenu">
+                            <span :class="claseCajaMovil">
+                                <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
+                                    <path v-for="(d, i) in iconos.inicio" :key="i" stroke-linecap="round" stroke-linejoin="round" :d="d" />
+                                </svg>
+                            </span>
+                            Mi Panel
+                        </Link>
+
+                        <template v-else>
+                            <Link :href="route('login')" :class="claseItemMovil" @click="cerrarMenu">
+                                <span :class="claseCajaMovil">
+                                    <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
+                                        <path v-for="(d, i) in iconos.entrar" :key="i" stroke-linecap="round" stroke-linejoin="round" :d="d" />
+                                    </svg>
+                                </span>
+                                Iniciar sesión
+                            </Link>
+
+                            <Link
+                                :href="route('register')"
+                                class="flex w-full items-center justify-center gap-2 rounded-xl bg-acento px-4 py-3 text-sm font-bold text-principal shadow-md transition-all duration-200 hover:bg-yellow-400 hover:shadow-lg hover:-translate-y-0.5 active:scale-95"
+                                @click="cerrarMenu"
+                            >
+                                <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
+                                    <path v-for="(d, i) in iconos.registrar" :key="i" stroke-linecap="round" stroke-linejoin="round" :d="d" />
+                                </svg>
+                                Registrarse
+                            </Link>
+                        </template>
+                    </nav>
+                </div>
+
+                <div class="px-4 py-4 border-t border-principal/10 text-[11px] text-gris-medio shrink-0">
+                    &copy; 2026 OficiosYa
+                </div>
+            </aside>
+        </Transition>
 
         <!-- 2. Hero Section con carrusel de imágenes -->
         <section class="relative overflow-hidden flex items-center min-h-[560px] sm:min-h-[680px] py-20 px-4 sm:px-6 lg:px-8 border-b border-slate-300 shadow-sm bg-gradient-to-br from-principal via-principal to-[#1d4a8a]">
