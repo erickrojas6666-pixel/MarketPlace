@@ -26,6 +26,9 @@
         @inertiaHead
     </head>
     <body class="font-sans antialiased">
+        {{-- Pantalla splash: se muestra siempre, antes de que cargue la página --}}
+        @include('partials.splash')
+
         @inertia
     </body>
 </html>
