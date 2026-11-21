@@ -35,31 +35,36 @@ const desde = computed(() => (props.prestador.miembro_desde ? props.prestador.mi
             </div>
           </Link>
           <nav class="flex items-center gap-3 sm:gap-4">
-            <Link :href="route('login')" class="px-4 py-2 text-sm font-semibold text-white/90 hover:text-white">Iniciar sesión</Link>
-            <Link :href="route('register')" class="px-5 py-2.5 text-sm font-bold text-principal bg-acento hover:bg-yellow-400 rounded-xl shadow-md">Registrarse</Link>
+            <Link :href="route('login')" class="px-4 py-2 text-sm font-semibold text-white/90 hover:text-white transition-colors">Iniciar sesión</Link>
+            <Link :href="route('register')" class="px-5 py-2.5 text-sm font-bold text-principal bg-acento hover:bg-yellow-400 hover:-translate-y-0.5 hover:shadow-lg rounded-xl shadow-md transition-all duration-200 active:scale-95">Registrarse</Link>
           </nav>
         </div>
       </header>
 
       <div class="py-10 max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 space-y-8">
 
-        <Link :href="route('servicios.index')" class="inline-flex items-center gap-1.5 text-xs font-bold text-principal hover:underline">
+        <Link
+          :href="route('servicios.index')"
+          class="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-bold text-principal bg-white rounded-xl border-2 border-slate-200 hover:border-principal/40 shadow-sm transition-all duration-200 active:scale-95"
+        >
           ← Volver al catálogo
         </Link>
 
         <!-- ============ ENCABEZADO ============ -->
-        <section class="bg-white rounded-3xl border-2 border-slate-200/90 shadow-md p-6 sm:p-8">
-          <div class="flex flex-col sm:flex-row gap-6">
+        <section class="relative overflow-hidden bg-white rounded-3xl border-2 border-slate-200/90 shadow-md p-6 sm:p-8">
+          <div class="absolute -top-16 -right-16 w-56 h-56 rounded-full bg-acento/15 blur-2xl pointer-events-none"></div>
+
+          <div class="relative flex flex-col sm:flex-row gap-6">
             <AvatarUsuario :nombre="prestador.nombre" :url="prestador.foto_url" clase="w-28 h-28 text-4xl" />
 
             <div class="min-w-0 space-y-3">
               <div class="flex flex-wrap items-center gap-2">
                 <h1 class="text-2xl sm:text-3xl font-extrabold text-principal tracking-tight">{{ prestador.nombre }}</h1>
-                <span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-green-50 border border-green-200 text-green-700 text-[11px] font-bold uppercase tracking-wider">
+                <span class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-green-50 border border-green-200 text-green-700 text-[11px] font-bold uppercase tracking-wider">
                   <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="3" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" /></svg>
                   Verificado
                 </span>
-                <span v-if="prestador.es_pro" class="px-2.5 py-1 rounded-full bg-acento/20 border border-acento/50 text-principal text-[11px] font-extrabold uppercase tracking-wider">Pro</span>
+                <span v-if="prestador.es_pro" class="px-3 py-1 rounded-full bg-acento/20 border border-acento/50 text-principal text-[11px] font-extrabold uppercase tracking-wider">Pro</span>
               </div>
 
               <p class="text-sm text-gris-medio">
@@ -68,13 +73,15 @@ const desde = computed(() => (props.prestador.miembro_desde ? props.prestador.mi
                 <template v-if="desde"> · En OficiosYa desde {{ desde }}</template>
               </p>
 
-              <div class="flex flex-wrap gap-x-6 gap-y-1 text-sm">
-                <span v-if="resumen.promedio !== null" class="font-bold text-principal">
+              <div class="flex flex-wrap gap-2 text-sm">
+                <span v-if="resumen.promedio !== null" class="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl bg-niebla/60 border border-slate-200 font-bold text-principal">
                   <span class="text-acento" aria-hidden="true">★</span> {{ resumen.promedio }}
                   <span class="font-medium text-gris-medio">({{ resumen.total_resenas }} reseñas)</span>
                 </span>
-                <span v-else class="text-gris-medio">Aún sin reseñas</span>
-                <span class="text-gris-medio"><strong class="text-principal">{{ resumen.trabajos_confirmados }}</strong> trabajos confirmados</span>
+                <span v-else class="inline-flex items-center px-3 py-1.5 rounded-xl bg-niebla/60 border border-slate-200 text-gris-medio">Aún sin reseñas</span>
+                <span class="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl bg-niebla/60 border border-slate-200 text-gris-medio">
+                  <strong class="text-principal">{{ resumen.trabajos_confirmados }}</strong> trabajos confirmados
+                </span>
               </div>
 
               <p v-if="prestador.descripcion" class="text-sm text-grafito leading-relaxed whitespace-pre-line">{{ prestador.descripcion }}</p>
@@ -84,34 +91,43 @@ const desde = computed(() => (props.prestador.miembro_desde ? props.prestador.mi
 
         <!-- ============ PORTAFOLIO ============ -->
         <section v-if="galeria.length" class="space-y-4">
-          <h2 class="text-lg font-extrabold text-principal">Trabajos realizados</h2>
+          <h2 class="text-lg font-extrabold text-principal tracking-tight">Trabajos realizados</h2>
           <GaleriaFotos :fotos="galeria" />
         </section>
 
         <!-- ============ SERVICIOS ============ -->
         <section class="space-y-4">
-          <h2 class="text-lg font-extrabold text-principal">Servicios</h2>
+          <h2 class="text-lg font-extrabold text-principal tracking-tight">Servicios</h2>
 
-          <p v-if="!servicios.length" class="text-sm text-gris-medio">Este prestador no tiene servicios publicados por ahora.</p>
+          <div v-if="!servicios.length" class="bg-white rounded-3xl border-2 border-dashed border-slate-300 p-10 text-center">
+            <div class="w-11 h-11 rounded-xl bg-niebla text-principal flex items-center justify-center mx-auto mb-3">
+              <svg class="w-6 h-6" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" /></svg>
+            </div>
+            <p class="text-sm text-gris-medio">Este prestador no tiene servicios publicados por ahora.</p>
+          </div>
 
           <div v-else class="grid grid-cols-1 md:grid-cols-2 gap-5">
-            <article v-for="s in servicios" :key="s.id" class="bg-white rounded-2xl border-2 border-slate-200/90 shadow-sm overflow-hidden flex flex-col">
+            <article
+              v-for="s in servicios"
+              :key="s.id"
+              class="bg-white rounded-3xl border-2 border-slate-200/90 shadow-md overflow-hidden flex flex-col hover:shadow-2xl hover:border-principal/40 hover:-translate-y-1.5 transition-all duration-300"
+            >
               <div v-if="s.portada" class="aspect-[16/9] bg-niebla">
                 <img :src="s.portada" :alt="s.titulo" loading="lazy" class="w-full h-full object-cover" />
               </div>
               <div class="p-5 space-y-2 flex-1">
                 <div class="flex items-center justify-between gap-2">
                   <span class="text-[11px] font-bold uppercase tracking-wider text-principal bg-niebla px-3 py-1 rounded-full truncate">{{ s.categoria || 'General' }}</span>
-                  <span v-if="s.precio_base !== null" class="shrink-0 text-sm font-extrabold text-principal bg-acento/20 border border-acento/50 px-3 py-1 rounded-full">${{ s.precio_base }}</span>
+                  <span v-if="s.precio_base !== null" class="shrink-0 text-xs font-extrabold text-principal bg-acento/20 border border-acento/50 px-3 py-1 rounded-full">${{ s.precio_base }}</span>
                 </div>
-                <h3 class="text-base font-extrabold text-principal">{{ s.titulo }}</h3>
+                <h3 class="font-extrabold text-lg text-principal tracking-tight">{{ s.titulo }}</h3>
                 <p class="text-sm text-gris-medio leading-relaxed line-clamp-3">{{ s.descripcion }}</p>
               </div>
               <div class="px-5 py-3 bg-niebla/40 border-t border-slate-200">
                 <Link
                   :href="estaAutenticado ? route('dashboard') : route('login')"
-                  class="inline-flex items-center px-3.5 py-2 text-xs font-bold rounded-xl shadow-sm"
-                  :class="estaAutenticado ? 'bg-principal text-white hover:bg-slate-800' : 'bg-acento text-principal hover:bg-yellow-400'"
+                  class="inline-flex items-center px-4 py-2 text-xs font-bold rounded-xl shadow-md transition-all duration-200 active:scale-95"
+                  :class="estaAutenticado ? 'bg-principal text-white hover:bg-slate-800' : 'bg-acento text-principal hover:bg-yellow-400 hover:-translate-y-0.5 hover:shadow-lg'"
                 >
                   {{ estaAutenticado ? 'Solicitar desde mi panel' : 'Inicia sesión para solicitar' }}
                 </Link>
@@ -122,9 +138,9 @@ const desde = computed(() => (props.prestador.miembro_desde ? props.prestador.mi
 
         <!-- ============ RESEÑAS ============ -->
         <section v-if="resenas.length" class="space-y-4">
-          <h2 class="text-lg font-extrabold text-principal">Reseñas de clientes</h2>
+          <h2 class="text-lg font-extrabold text-principal tracking-tight">Reseñas de clientes</h2>
           <ul class="space-y-3">
-            <li v-for="r in resenas" :key="r.id" class="bg-white rounded-2xl border border-slate-200 p-4">
+            <li v-for="r in resenas" :key="r.id" class="bg-white rounded-2xl border-2 border-slate-200/90 shadow-sm p-4">
               <div class="flex items-center justify-between gap-3">
                 <span class="text-sm font-bold text-principal">{{ r.autor }}</span>
                 <span class="text-acento text-sm tracking-wider" :aria-label="`${r.calificacion} de 5 estrellas`">{{ estrellas(r.calificacion) }}</span>
