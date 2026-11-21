@@ -4,9 +4,8 @@ import { usePwa } from '../composables/usePwa';
 import { aviso, mostrarAviso, pendientes, sincronizando, sincronizar, usuarioId } from '../offline/sync';
 import { activarPush, motivoFallo, ocupado as activandoPush, permiso, pushDisponible, suscrito } from '../composables/usePush';
 
-const { enLinea, hayActualizacion, puedeInstalar, mostrarGuiaIOS, instalar, actualizar } = usePwa();
-
-const ocultarInstalacion = ref(false);
+// La invitación a instalar la app ya no flota aquí: vive en la landing y en los menús (InstalarApp.vue).
+const { enLinea, hayActualizacion, actualizar } = usePwa();
 
 // Invitación a activar notificaciones (solo con sesión iniciada; el permiso se pide al hacer clic).
 const CLAVE_PUSH = 'oficiosya-push-descartado';
@@ -132,32 +131,6 @@ const activarNotificaciones = async () => {
             >
                 Actualizar
             </button>
-        </div>
-
-        <!-- PWA-08: instalar (Android/Chrome/Edge) -->
-        <div
-            v-if="puedeInstalar && !ocultarInstalacion"
-            class="pointer-events-auto flex w-full max-w-md items-center justify-between gap-3 rounded-lg bg-white px-4 py-3 text-sm text-gray-800 shadow-lg ring-1 ring-gray-200"
-        >
-            <span>Instala OficiosYa en tu pantalla de inicio.</span>
-            <span class="flex gap-2">
-                <button type="button" class="text-gray-500" @click="ocultarInstalacion = true">Ahora no</button>
-                <button type="button" class="rounded-md bg-[#14305D] px-3 py-1 font-semibold text-white" @click="instalar">
-                    Instalar
-                </button>
-            </span>
-        </div>
-
-        <!-- PWA-08: instrucciones manuales en iOS -->
-        <div
-            v-if="mostrarGuiaIOS && !ocultarInstalacion"
-            class="pointer-events-auto w-full max-w-md rounded-lg bg-white px-4 py-3 text-sm text-gray-800 shadow-lg ring-1 ring-gray-200"
-        >
-            <p>
-                Para instalar: toca el botón <strong>Compartir</strong> de Safari y luego
-                <strong>«Añadir a pantalla de inicio»</strong>.
-            </p>
-            <button type="button" class="mt-2 text-gray-500" @click="ocultarInstalacion = true">Entendido</button>
         </div>
     </div>
 </template>

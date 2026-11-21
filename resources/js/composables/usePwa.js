@@ -81,11 +81,13 @@ export function usePwa() {
     // iOS no dispara beforeinstallprompt: se muestran instrucciones manuales.
     const mostrarGuiaIOS = computed(() => !instalada.value && esIOS && eventoInstalacion.value === null);
 
+    /** Abre el cuadro de instalación del navegador. Devuelve true si el usuario aceptó. */
     async function instalar() {
-        if (!eventoInstalacion.value) return;
+        if (!eventoInstalacion.value) return false;
         eventoInstalacion.value.prompt();
-        await eventoInstalacion.value.userChoice;
+        const { outcome } = await eventoInstalacion.value.userChoice;
         eventoInstalacion.value = null;
+        return outcome === 'accepted';
     }
 
     /** Activa el SW nuevo (mensaje SKIP_WAITING) y recarga cuando toma el control. */

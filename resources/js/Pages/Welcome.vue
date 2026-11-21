@@ -1,6 +1,7 @@
 <script setup>
 import { ref, onMounted, onBeforeUnmount } from 'vue';
 import { Head, Link } from '@inertiajs/vue3';
+import InstalarApp from '@/Components/InstalarApp.vue';
 
 defineProps({
     canLogin: Boolean,
@@ -264,6 +265,9 @@ const categorias = [
                             </Link>
                         </template>
                     </nav>
+
+                    <!-- Instalar la app (solo se ve en el navegador) -->
+                    <InstalarApp variante="panel" />
                 </div>
 
                 <div class="px-4 py-4 border-t border-principal/10 text-[11px] text-gris-medio shrink-0">
@@ -324,6 +328,11 @@ const categorias = [
                 </div>
             </div>
         </section>
+
+        <!-- Invitación a instalar la app (solo se ve en el navegador) -->
+        <div class="px-4 sm:px-6 lg:px-8 max-w-7xl mx-auto w-full">
+            <InstalarApp variante="tarjeta" />
+        </div>
 
         <!-- 3. Categorías con íconos vectoriales rediseñados y representativos -->
         <section class="py-16 px-4 sm:px-6 lg:px-8 max-w-7xl mx-auto w-full">

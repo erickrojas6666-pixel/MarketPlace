@@ -4,6 +4,7 @@ import Dropdown from '@/Components/Dropdown.vue'
 import { Link, usePage } from '@inertiajs/vue3'
 import Toast from '@/Components/Toast.vue'
 import AvatarUsuario from '@/Components/AvatarUsuario.vue'
+import InstalarApp from '@/Components/InstalarApp.vue'
 
 const menuAbierto = ref(false)
 const page = usePage()
@@ -213,6 +214,9 @@ const cajaEscritorioSalir =
                         Ajustes de cuenta
                       </Link>
 
+                      <!-- Instalar la app (solo se ve en el navegador) -->
+                      <InstalarApp variante="menu" />
+
                       <div class="my-1 border-t border-slate-200"></div>
 
                       <Link :href="route('logout')" method="post" as="button" :class="itemEscritorioSalir">
@@ -311,29 +315,34 @@ const cajaEscritorioSalir =
             </div>
 
             <!-- Secciones -->
-            <div v-for="sec in secciones" :key="sec.titulo" class="mt-5 first:mt-0">
-              <p class="px-1 mb-2 text-[11px] font-extrabold uppercase tracking-wider text-gris-medio">
-                {{ sec.titulo }}
-              </p>
-              <nav class="space-y-2">
-                <Link
-                  v-for="item in sec.items"
-                  :key="item.nombre"
-                  :href="item.href"
-                  :method="item.salir ? 'post' : 'get'"
-                  :as="item.salir ? 'button' : 'a'"
-                  :class="claseItem(item)"
-                  @click="cerrarMenu"
-                >
-                  <span :class="claseCaja(item)">
-                    <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
-                      <path v-for="(d, i) in iconos[item.icono]" :key="i" stroke-linecap="round" stroke-linejoin="round" :d="d" />
-                    </svg>
-                  </span>
-                  {{ item.nombre }}
-                </Link>
-              </nav>
-            </div>
+            <template v-for="(sec, idx) in secciones" :key="sec.titulo">
+              <div class="mt-5 first:mt-0">
+                <p class="px-1 mb-2 text-[11px] font-extrabold uppercase tracking-wider text-gris-medio">
+                  {{ sec.titulo }}
+                </p>
+                <nav class="space-y-2">
+                  <Link
+                    v-for="item in sec.items"
+                    :key="item.nombre"
+                    :href="item.href"
+                    :method="item.salir ? 'post' : 'get'"
+                    :as="item.salir ? 'button' : 'a'"
+                    :class="claseItem(item)"
+                    @click="cerrarMenu"
+                  >
+                    <span :class="claseCaja(item)">
+                      <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
+                        <path v-for="(d, i) in iconos[item.icono]" :key="i" stroke-linecap="round" stroke-linejoin="round" :d="d" />
+                      </svg>
+                    </span>
+                    {{ item.nombre }}
+                  </Link>
+                </nav>
+              </div>
+
+              <!-- Instalar la app (solo se ve en el navegador) -->
+              <InstalarApp v-if="idx === 0" variante="panel" />
+            </template>
           </div>
         </aside>
       </Transition>
