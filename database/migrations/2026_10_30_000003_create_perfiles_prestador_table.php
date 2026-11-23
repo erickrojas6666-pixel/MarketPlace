@@ -8,10 +8,6 @@ return new class extends Migration
 {
     public function up(): void
     {
-        if (Schema::hasTable('perfiles_prestador')) {
-            return;
-        }
-
         Schema::create('perfiles_prestador', function (Blueprint $table) {
             $table->id();
 
@@ -21,6 +17,11 @@ return new class extends Migration
             $table->text('descripcion')->nullable();
             $table->string('ubicacion_aproximada')->nullable();
 
+            // latitud/longitud: la app las guarda redondeadas (~110 m) y nunca las expone.
+            $table->decimal('latitud', 10, 7)->nullable();
+            $table->decimal('longitud', 10, 7)->nullable();
+            $table->unsignedSmallInteger('radio_cobertura_km')->default(10);
+
             // Coincide con PerfilPrestador::ESTADOS.
             $table->enum('estado_verificacion', ['pendiente', 'verificado', 'rechazado'])
                 ->default('pendiente')
@@ -29,6 +30,8 @@ return new class extends Migration
 
             $table->boolean('es_pro')->default(false);
             $table->timestamps();
+
+            $table->index(['latitud', 'longitud'], 'perfiles_prestador_lat_lng_index');
         });
     }
 

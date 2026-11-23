@@ -8,25 +8,35 @@ return new class extends Migration
 {
     /**
      * Ubicación del prestador para poder filtrar el catálogo por cercanía.
-     *
-     * latitud/longitud: decimal(10,7) da ~1 cm de precisión; la app las guarda
-     * redondeadas a 3 decimales (~110 m) para no revelar el domicilio exacto.
-     * radio_cobertura_km: hasta dónde está dispuesto a desplazarse el prestador.
      */
     public function up(): void
     {
         Schema::table('perfiles_prestador', function (Blueprint $table) {
-            $table->decimal('latitud', 10, 7)->nullable()->after('ubicacion_aproximada');
-            $table->decimal('longitud', 10, 7)->nullable()->after('latitud');
-            $table->unsignedSmallInteger('radio_cobertura_km')->default(10)->after('longitud');
+            // Agregamos las columnas solo si no existen previamente
+            if (!Schema::hasColumn('perfiles_prestador', 'latitud')) {
+                $table->decimal('latitud', 10, 7)->nullable()->after('ubicacion_aproximada');
+            }
 
-            $table->index(['latitud', 'longitud'], 'perfiles_prestador_lat_lng_index');
+            if (!Schema::hasColumn('perfiles_prestador', 'longitud')) {
+                $table->decimal('longitud', 10, 7)->nullable()->after('latitud');
+            }
+
+            if (!Schema::hasColumn('perfiles_prestador', 'radio_cobertura_km')) {
+                $table->unsignedSmallInteger('radio_cobertura_km')->default(10)->after('longitud');
+            }
+
+            // Para el índice, verificamos si ya existe para evitar errores
+            $indexName = 'perfiles_prestador_lat_lng_index';
+            if (!collect(Schema::getIndexes('perfiles_prestador'))->pluck('name')->contains($indexName)) {
+                $table->index(['latitud', 'longitud'], $indexName);
+            }
         });
     }
 
     public function down(): void
     {
         Schema::table('perfiles_prestador', function (Blueprint $table) {
+            // Eliminamos el índice y las columnas de forma segura
             $table->dropIndex('perfiles_prestador_lat_lng_index');
             $table->dropColumn(['latitud', 'longitud', 'radio_cobertura_km']);
         });

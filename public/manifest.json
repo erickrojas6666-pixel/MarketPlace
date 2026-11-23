@@ -1,12 +1,12 @@
 {
-  "name": "FiciosYA",
-  "short_name": "FiciosYA",
+  "name": "OficiosYa",
+  "short_name": "OficiosYa",
   "description": "Encuentra servicios y oficios cerca de ti, al instante.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
   "background_color": "#FFFFFF",
-  "theme_color": "#12305F",
+  "theme_color": "#14305D",
   "icons": [
     {
       "src": "/icons/icon-72x72.png",
@@ -68,5 +68,12 @@
       "type": "image/png",
       "purpose": "maskable"
     }
+  ],
+  "id": "/",
+  "lang": "es-MX",
+  "orientation": "portrait",
+  "categories": [
+    "business",
+    "lifestyle"
   ]
 }

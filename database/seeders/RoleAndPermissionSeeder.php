@@ -1,3 +1,5 @@
+<?php
+
 namespace Database\Seeders;
 
 use Illuminate\Database\Seeder;
@@ -12,18 +14,29 @@ class RoleAndPermissionSeeder extends Seeder
         app()[\Spatie\Permission\PermissionRegistrar::class]->forgetCachedPermissions();
 
         // 1. Crear Permisos Básicos
-        Permission::create(['name' => 'publicar servicios']);
-        Permission::create(['name' => 'contratar servicios']);
-        Permission::create(['name' => 'gestionar plataforma']);
+        Permission::firstOrCreate(['name' => 'publicar servicios']);
+        Permission::firstOrCreate(['name' => 'contratar servicios']);
+        Permission::firstOrCreate(['name' => 'gestionar plataforma']);
 
         // 2. Crear Roles y Asignar Permisos
-        $roleCliente = Role::create(['name' => 'cliente']);
+        $roleCliente = Role::firstOrCreate(['name' => 'cliente']);
         $roleCliente->givePermissionTo('contratar servicios');
 
-        $rolePrestador = Role::create(['name' => 'prestador']);
+        $rolePrestador = Role::firstOrCreate(['name' => 'prestador']);
         $rolePrestador->givePermissionTo(['publicar servicios', 'contratar servicios']);
 
-        $roleAdmin = Role::create(['name' => 'admin']);
+        // Roles faltantes de la imagen
+        $roleVerificador = Role::firstOrCreate(['name' => 'verificador']);
+        $roleMediador = Role::firstOrCreate(['name' => 'mediador']);
+        $roleFinanzas = Role::firstOrCreate(['name' => 'finanzas']);
+        
+        $roleSuperadmin = Role::firstOrCreate(['name' => 'superadmin']);
+        $roleSuperadmin->givePermissionTo(Permission::all());
+
+        $roleAdmin = Role::firstOrCreate(['name' => 'admin']);
         $roleAdmin->givePermissionTo(Permission::all());
+
+        $roleModerador = Role::firstOrCreate(['name' => 'moderador']);
+        $roleAnalista = Role::firstOrCreate(['name' => 'analista']);
     }
 }

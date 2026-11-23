@@ -27,10 +27,11 @@ class ResenaController extends Controller
             abort(403, 'No tienes permiso para calificar este pedido.');
         }
 
-        // Solo se reseñan trabajos terminados
-        if ($pedido->estado !== Pedido::COMPLETADO) {
+        // RF-35: solo se califica un trabajo ya confirmado por el cliente
+        // (o cuya disputa se resolvió a favor de liberar el pago).
+        if ($pedido->estado !== Pedido::CONFIRMADO) {
             throw ValidationException::withMessages([
-                'pedido_id' => 'Solo puedes calificar pedidos completados.',
+                'pedido_id' => 'Solo puedes calificar pedidos confirmados.',
             ]);
         }
 

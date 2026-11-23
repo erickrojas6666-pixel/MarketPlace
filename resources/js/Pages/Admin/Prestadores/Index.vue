@@ -187,6 +187,12 @@ const iconos = {
 
                 <td class="px-6 py-4">
                   <div class="flex justify-end gap-2">
+                    <Link
+                      :href="route('admin.prestadores.show', p.id)"
+                      class="inline-flex items-center gap-1.5 px-3.5 py-2 bg-white hover:bg-niebla text-principal text-xs font-bold rounded-xl border-2 border-slate-200 hover:border-principal/40 transition active:scale-95 focus:outline-none focus-visible:ring-2 focus-visible:ring-acento"
+                    >
+                      Ver ficha
+                    </Link>
                     <button
                       v-if="p.estado_verificacion !== 'verificado'"
                       @click="abrirModal(p, 'aprobado')"

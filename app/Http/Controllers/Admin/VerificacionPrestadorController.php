@@ -3,8 +3,13 @@
 namespace App\Http\Controllers\Admin;
 
 use App\Http\Controllers\Controller;
+use App\Models\Pedido;
 use App\Models\PerfilPrestador;
+use App\Models\Resena;
 use App\Notifications\EstadoVerificacionNotification;
+use App\Support\Auditoria;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\Rule;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Inertia\Inertia;
@@ -39,12 +44,76 @@ class VerificacionPrestadorController extends Controller
     }
 
     /**
+     * Ficha del prestador para el administrador: lo necesario para decidir
+     * si aprueba o rechaza sin salir de la tabla a ciegas.
+     *
+     * Nunca se envía latitud/longitud: solo la ubicación aproximada en texto
+     * y el radio de cobertura (misma regla que en el perfil público).
+     */
+    public function show(PerfilPrestador $perfil): Response
+    {
+        $perfil->load([
+            'user:id,nombre,email',
+            'servicios' => fn ($query) => $query
+                ->select('id', 'perfil_prestador_id', 'categoria_id', 'titulo', 'precio_base', 'activo')
+                ->with('categoria:id,nombre')
+                ->orderBy('titulo'),
+        ]);
+
+        // Los pedidos y las reseñas cuelgan del servicio, no del perfil.
+        $idsServicios = $perfil->servicios()->select('id');
+
+        $conteoPedidos = Pedido::query()
+            ->whereIn('servicio_id', $idsServicios)
+            ->selectRaw('estado, COUNT(*) as total')
+            ->groupBy('estado')
+            ->pluck('total', 'estado');
+
+        // Todos los estados siempre presentes (en 0 si no hay), para que la vista no tenga que adivinar.
+        $pedidosPorEstado = collect(Pedido::ESTADOS)
+            ->mapWithKeys(fn (string $estado) => [$estado => (int) ($conteoPedidos[$estado] ?? 0)]);
+
+        $resenas = Resena::query()
+            ->whereIn('servicio_id', $idsServicios)
+            ->selectRaw('AVG(calificacion) as promedio, COUNT(*) as total')
+            ->first();
+
+        return Inertia::render('Admin/Prestadores/Perfil', [
+            'perfil' => [
+                'id'                   => $perfil->id,
+                'descripcion'          => $perfil->descripcion,
+                'ubicacion_aproximada' => $perfil->ubicacion_aproximada,
+                'radio_cobertura_km'   => $perfil->radio_cobertura_km,
+                'estado_verificacion'  => $perfil->estado_verificacion,
+                'created_at'           => $perfil->created_at,
+            ],
+            'usuario' => [
+                'nombre' => $perfil->user?->nombre,
+                'email'  => $perfil->user?->email,
+            ],
+            'servicios' => $perfil->servicios->map(fn ($servicio) => [
+                'id'          => $servicio->id,
+                'titulo'      => $servicio->titulo,
+                'precio_base' => $servicio->precio_base,
+                'activo'      => $servicio->activo,
+                'categoria'   => $servicio->categoria?->nombre,
+            ])->values(),
+            'pedidosPorEstado' => $pedidosPorEstado,
+            'totalPedidos'     => $pedidosPorEstado->sum(),
+            'resenas' => [
+                'promedio' => $resenas?->promedio !== null ? round((float) $resenas->promedio, 1) : null,
+                'total'    => (int) ($resenas?->total ?? 0),
+            ],
+        ]);
+    }
+
+    /**
      * Aprueba o rechaza la solicitud de verificación de un prestador.
      */
     public function updateStatus(Request $request, PerfilPrestador $perfil): RedirectResponse
     {
         $request->validate([
-            'estado' => 'required|string',
+            'estado' => ['required', 'string', Rule::in(['aprobado', 'verificado', 'rechazado', 'pendiente'])],
         ]);
 
         // Mapeo defensivo: el frontend envía 'aprobado', pero la BD MySQL espera 'verificado'
@@ -61,9 +130,22 @@ class VerificacionPrestadorController extends Controller
         }
 
         // Actualizar ÚNICAMENTE la columna que existe en la BD
-        $perfil->update([
-            'estado_verificacion' => $nuevoEstado,
-        ]);
+        // RF-52: el cambio y su rastro van juntos o no van.
+        DB::transaction(function () use ($perfil, $nuevoEstado) {
+            $anterior = $perfil->estado_verificacion;
+
+            $perfil->update([
+                'estado_verificacion' => $nuevoEstado,
+            ]);
+
+            Auditoria::registrar(
+                'prestador.verificacion_cambiada',
+                'perfil_prestador',
+                $perfil->id,
+                ['estado_verificacion' => $anterior],
+                ['estado_verificacion' => $nuevoEstado],
+            );
+        });
 
         // Notificar al usuario prestador en la tabla 'notifications'
         if ($perfil->user) {

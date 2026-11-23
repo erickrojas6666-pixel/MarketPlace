@@ -16,6 +16,10 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
  * @property string $descripcion
  * @property string|null $precio_base
  * @property bool $activo
+ * @property-read PerfilPrestador $perfilPrestador
+ * @property-read Categoria $categoria
+ * @property-read \Illuminate\Database\Eloquent\Collection<int, Pedido> $pedidos
+ * @property-read \Illuminate\Database\Eloquent\Collection<int, Resena> $resenas
  */
 class Servicio extends Model
 {
@@ -60,7 +64,7 @@ class Servicio extends Model
             ->whereHas('perfilPrestador', fn ($q) => $q->cercanosA($lat, $lng, $km))
             ->addSelect([
                 'distancia_km' => PerfilPrestador::query()
-                    ->selectRaw('ROUND('.PerfilPrestador::SQL_DISTANCIA.', 1)', [$lat, $lng, $lat])
+                    ->selectRaw('ROUND(CAST('.PerfilPrestador::SQL_DISTANCIA.' AS DECIMAL(10,4)), 1)', [$lat, $lng, $lat])
                     ->whereColumn('perfiles_prestador.id', 'servicios.perfil_prestador_id')
                     ->limit(1),
             ])
@@ -70,6 +74,18 @@ class Servicio extends Model
     public function perfilPrestador(): BelongsTo
     {
         return $this->belongsTo(PerfilPrestador::class, 'perfil_prestador_id');
+    }
+
+    /** Paquetes del servicio (básico / completo / avanzado). */
+    public function niveles(): HasMany
+    {
+        return $this->hasMany(NivelesServicio::class, 'servicio_id');
+    }
+
+    /** Portafolio: muestra de trabajos realizados (la primera es la portada). */
+    public function fotos(): HasMany
+    {
+        return $this->hasMany(FotoTrabajo::class, 'servicio_id')->orderBy('orden')->orderBy('id');
     }
 
     public function categoria(): BelongsTo

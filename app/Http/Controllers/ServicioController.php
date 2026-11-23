@@ -44,7 +44,8 @@ class ServicioController extends Controller
             ->with([
                 'categoria:id,nombre',
                 'perfilPrestador:id,user_id',
-                'perfilPrestador.user:id,nombre',
+                'perfilPrestador.user:id,nombre,foto_path',
+                'fotos',
             ])
             ->activos()
             ->whereHas(

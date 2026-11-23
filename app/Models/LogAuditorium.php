@@ -8,6 +8,7 @@ namespace App\Models;
 
 use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Model;
+use LogicException;
 
 /**
  * Class LogAuditorium
@@ -49,6 +50,13 @@ class LogAuditorium extends Model
 		'ip_origen',
 		'creada_en'
 	];
+
+	/** Registro inmutable: solo se inserta (RF-52). */
+	protected static function booted(): void
+	{
+		static::updating(fn () => throw new LogicException('El registro de auditoría es de solo inserción.'));
+		static::deleting(fn () => throw new LogicException('El registro de auditoría no se puede borrar.'));
+	}
 
 	public function user()
 	{

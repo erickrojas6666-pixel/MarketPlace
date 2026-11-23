@@ -2,13 +2,16 @@
 
 namespace App\Models;
 
+use App\Services\AlmacenFotos;
 use Carbon\Carbon;
+use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\HasOne;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
+use Laravel\Sanctum\HasApiTokens;
 use Spatie\Permission\Traits\HasRoles;
 
 /**
@@ -34,7 +37,7 @@ use Spatie\Permission\Traits\HasRoles;
  */
 class User extends Authenticatable
 {
-    use HasFactory, Notifiable, HasRoles;
+    use HasApiTokens, HasFactory, Notifiable, HasRoles;
 
     protected $table = 'users';
 
@@ -62,13 +65,30 @@ class User extends Authenticatable
         'remember_token',
         'google_id',
         'two_factor_code',
+        'foto_path', // la ruta no viaja; el frontend recibe foto_url
     ];
+
+    /** URL pública de la miniatura de perfil (null si no hay foto). */
+    protected $appends = ['foto_url'];
 
     protected function casts(): array
     {
         return [
             'email_verified_at' => 'datetime',
         ];
+    }
+
+    /**
+     * Miniatura (400 px) de la foto de perfil. Se lee de $attributes para no fallar
+     * cuando la consulta no seleccionó la columna (p. ej. 'cliente:id,nombre').
+     */
+    protected function fotoUrl(): Attribute
+    {
+        return Attribute::get(function () {
+            $ruta = $this->attributes['foto_path'] ?? null;
+
+            return $ruta ? app(AlmacenFotos::class)->urlPublica(AlmacenFotos::miniaturaDe($ruta)) : null;
+        });
     }
 
     /* -----------------------------------------------------------------

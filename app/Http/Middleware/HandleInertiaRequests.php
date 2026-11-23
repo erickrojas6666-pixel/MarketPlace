@@ -29,12 +29,17 @@ class HandleInertiaRequests extends Middleware
                     'id'          => $user->id,
                     'nombre'      => $user->nombre,
                     'email'       => $user->email,
+                    'fotoUrl'     => $user->foto_url,
                     'roles'       => $user->getRoleNames(),
                     'esPrestador' => $user->hasRole('prestador'),
                     'esCliente'   => $user->hasRole('cliente'),
                     // Coincide con las rutas /admin (role:admin|superadmin|...).
                     'esAdmin'     => $user->hasAnyRole(['admin', 'superadmin']),
                 ] : null,
+            ],
+
+            'marketplace' => [
+                'horasConfirmacion' => (int) config('marketplace.horas_confirmacion_automatica'),
             ],
 
             // Lo lee Components/Toast.vue (page.props.flash).

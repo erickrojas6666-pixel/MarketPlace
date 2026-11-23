@@ -2,8 +2,7 @@
 <phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
          xsi:noNamespaceSchemaLocation="vendor/phpunit/phpunit/phpunit.xsd"
          bootstrap="vendor/autoload.php"
-         colors="true"
->
+         colors="true">
     <testsuites>
         <testsuite name="Unit">
             <directory>tests/Unit</directory>
@@ -19,18 +18,34 @@
     </source>
     <php>
         <env name="APP_ENV" value="testing"/>
+        <env name="APP_URL" value="http://localhost" force="true"/>
+        <env name="APP_DEBUG" value="false" force="true"/>
         <env name="APP_MAINTENANCE_DRIVER" value="file"/>
         <env name="BCRYPT_ROUNDS" value="4"/>
-        <env name="BROADCAST_CONNECTION" value="null"/>
         <env name="CACHE_STORE" value="array"/>
+        <env name="SESSION_DRIVER" value="array"/>
+        <env name="QUEUE_CONNECTION" value="sync"/>
+        <env name="MAIL_MAILER" value="array"/>
+        <env name="MARKETPLACE_CORREO" value="smtp"/>
+        <env name="MARKETPLACE_PASARELA" value="simulada"/>
+
+        <!-- Nunca llamar a servicios externos reales durante las pruebas -->
+        <env name="RESEND_API_KEY" value="" force="true"/>
+        <env name="MAIL_USERNAME" value="" force="true"/>
+        <env name="MP_ACCESS_TOKEN" value="" force="true"/>
+        <env name="MP_WEBHOOK_SECRET" value="" force="true"/>
+        <env name="VAPID_PUBLIC_KEY" value="" force="true"/>
+        <env name="VAPID_PRIVATE_KEY" value="" force="true"/>
+
+        <!-- Pruebas con BD: una base APARTE (el nombre debe terminar en _test) -->
+        <env name="DB_CONNECTION" value="mysql"/>
+        <env name="DB_DATABASE" value="marketplace_test"/>
+
+        <!-- Alternativa: SQLite en memoria (como el phpunit.xml original del repo).
+             Comenta las dos lineas de arriba y descomenta estas dos. Requiere que las
+             migraciones creen TODAS las tablas.
         <env name="DB_CONNECTION" value="sqlite"/>
         <env name="DB_DATABASE" value=":memory:"/>
-        <env name="DB_URL" value=""/>
-        <env name="MAIL_MAILER" value="array"/>
-        <env name="QUEUE_CONNECTION" value="sync"/>
-        <env name="SESSION_DRIVER" value="array"/>
-        <env name="PULSE_ENABLED" value="false"/>
-        <env name="TELESCOPE_ENABLED" value="false"/>
-        <env name="NIGHTWATCH_ENABLED" value="false"/>
+        -->
     </php>
 </phpunit>

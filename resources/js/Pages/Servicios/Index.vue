@@ -2,7 +2,9 @@
 import { ref, watch, computed } from 'vue'
 import { Head, Link, router, usePage } from '@inertiajs/vue3'
 import AuthenticatedLayout from '@/Layouts/AuthenticatedLayout.vue'
+import AvatarUsuario from '@/Components/AvatarUsuario.vue'
 import BuscadorUbicacion from '@/Components/BuscadorUbicacion.vue'
+import MapaUbicacion from '@/Components/MapaUbicacion.vue'
 import { useGeolocalizacion, redondear } from '@/composables/useGeolocalizacion'
 
 const props = defineProps({
@@ -239,6 +241,9 @@ const iconos = {
             Mostrando prestadores que atienden tu zona, del más cercano al más lejano.
           </p>
 
+          <!-- Tu punto de búsqueda y el radio (los prestadores nunca muestran su ubicación exacta) -->
+          <MapaUbicacion v-if="hayUbicacion" :lat="lat" :lng="lng" :radio-km="Number(radioKm)" altura="560px" />
+
           <p class="text-xs text-gris-medio flex items-center gap-1.5">
             <svg class="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" :d="iconos.candado" />
@@ -352,6 +357,27 @@ const iconos = {
               :key="servicio.id"
               class="bg-white rounded-2xl border-2 border-slate-200/90 shadow-md hover:shadow-2xl hover:border-principal/40 hover:-translate-y-1.5 transition-all duration-300 overflow-hidden flex flex-col justify-between"
             >
+              <!-- Portada: primera foto del portafolio; lleva al perfil público del prestador -->
+              <Link
+                v-if="servicio.fotos?.length"
+                :href="route('prestadores.show', servicio.perfil_prestador.id)"
+                class="relative block aspect-[16/9] bg-niebla overflow-hidden"
+                :aria-label="`Ver trabajos de ${nombrePrestador(servicio)}`"
+              >
+                <img
+                  :src="servicio.fotos[0].url_miniatura"
+                  :alt="servicio.fotos[0].pie || servicio.titulo"
+                  loading="lazy"
+                  class="w-full h-full object-cover transition-transform duration-300 hover:scale-105"
+                />
+                <span
+                  v-if="servicio.fotos.length > 1"
+                  class="absolute bottom-2 right-2 px-2 py-0.5 rounded-full bg-black/60 text-white text-[11px] font-bold"
+                >
+                  {{ servicio.fotos.length }} fotos
+                </span>
+              </Link>
+
               <div class="p-6 space-y-3">
                 <div class="flex justify-between items-center gap-2">
                   <span class="text-[11px] font-bold uppercase tracking-wider text-principal bg-niebla px-3 py-1 rounded-full border border-principal/15 truncate">
@@ -386,12 +412,19 @@ const iconos = {
 
               <div class="px-6 py-4 bg-niebla/40 border-t border-slate-200 flex items-center justify-between gap-3">
                 <div class="flex items-center gap-2.5 min-w-0">
-                  <div class="w-9 h-9 shrink-0 rounded-xl bg-gradient-to-br from-principal to-[#1d4a8a] text-white font-extrabold text-xs flex items-center justify-center shadow-sm">
-                    {{ iniciales(nombrePrestador(servicio)) }}
-                  </div>
+                  <AvatarUsuario
+                    :nombre="nombrePrestador(servicio)"
+                    :url="servicio.perfil_prestador?.user?.foto_url"
+                    clase="w-9 h-9 text-xs"
+                  />
                   <div class="min-w-0">
                     <p class="text-[11px] text-gris-medio leading-none">Por</p>
-                    <p class="text-xs font-bold text-principal truncate mt-0.5">{{ nombrePrestador(servicio) }}</p>
+                    <Link
+                      :href="route('prestadores.show', servicio.perfil_prestador.id)"
+                      class="block text-xs font-bold text-principal truncate mt-0.5 hover:underline"
+                    >
+                      {{ nombrePrestador(servicio) }}
+                    </Link>
                   </div>
                 </div>
 
