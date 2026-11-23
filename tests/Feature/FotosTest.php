@@ -163,7 +163,7 @@ class FotosTest extends TestCase
 
     public function test_prestador_verificado_agrega_foto_al_portafolio(): void
     {
-        [$user, , $servicio] = $this->prestador();
+        [$user,, $servicio] = $this->prestador();
 
         $this->actingAs($user)
             ->post(route('servicios.fotos.store', $servicio), ['foto' => $this->foto(), 'pie' => 'Baño terminado'])
@@ -175,7 +175,7 @@ class FotosTest extends TestCase
 
     public function test_prestador_no_puede_subir_fotos_a_servicio_ajeno(): void
     {
-        [$duenio, , $servicio] = $this->prestador();
+        [$duenio,, $servicio] = $this->prestador();
         [$otro] = $this->prestador();
 
         $this->actingAs($otro)
@@ -188,7 +188,7 @@ class FotosTest extends TestCase
 
     public function test_prestador_no_verificado_no_puede_subir_fotos(): void
     {
-        [$user, , $servicio] = $this->prestador('pendiente');
+        [$user,, $servicio] = $this->prestador('pendiente');
 
         $this->actingAs($user)
             ->post(route('servicios.fotos.store', $servicio), ['foto' => $this->foto()])
@@ -197,7 +197,7 @@ class FotosTest extends TestCase
 
     public function test_cliente_no_puede_subir_fotos_de_portafolio(): void
     {
-        [, , $servicio] = $this->prestador();
+        [,, $servicio] = $this->prestador();
 
         $this->actingAs($this->cliente())
             ->post(route('servicios.fotos.store', $servicio), ['foto' => $this->foto()])
@@ -207,7 +207,7 @@ class FotosTest extends TestCase
     public function test_portafolio_respeta_el_maximo_por_servicio(): void
     {
         config(['marketplace.fotos.max_por_servicio' => 2]);
-        [$user, , $servicio] = $this->prestador();
+        [$user,, $servicio] = $this->prestador();
 
         foreach (range(1, 2) as $i) {
             $this->actingAs($user)->post(route('servicios.fotos.store', $servicio), ['foto' => $this->foto("f{$i}.jpg")]);
@@ -222,7 +222,7 @@ class FotosTest extends TestCase
 
     public function test_marcar_como_portada_reordena_el_portafolio(): void
     {
-        [$user, , $servicio] = $this->prestador();
+        [$user,, $servicio] = $this->prestador();
 
         foreach (range(1, 3) as $i) {
             $this->actingAs($user)->post(route('servicios.fotos.store', $servicio), ['foto' => $this->foto("f{$i}.jpg")]);
@@ -237,7 +237,7 @@ class FotosTest extends TestCase
 
     public function test_eliminar_foto_de_portafolio_borra_los_archivos(): void
     {
-        [$user, , $servicio] = $this->prestador();
+        [$user,, $servicio] = $this->prestador();
         $this->actingAs($user)->post(route('servicios.fotos.store', $servicio), ['foto' => $this->foto()]);
 
         $foto = $servicio->fotos()->first();
@@ -252,7 +252,7 @@ class FotosTest extends TestCase
 
     public function test_otro_prestador_no_puede_borrar_foto_ajena(): void
     {
-        [$duenio, , $servicio] = $this->prestador();
+        [$duenio,, $servicio] = $this->prestador();
         [$otro] = $this->prestador();
         $this->actingAs($duenio)->post(route('servicios.fotos.store', $servicio), ['foto' => $this->foto()]);
 
@@ -266,8 +266,14 @@ class FotosTest extends TestCase
     public function test_perfil_publico_muestra_el_portafolio_y_no_filtra_rutas_ni_correo(): void
     {
         [$user, $perfil, $servicio] = $this->prestador();
+
+        // 1. Inicia sesión para subir la foto
         $this->actingAs($user)->post(route('servicios.fotos.store', $servicio), ['foto' => $this->foto()]);
 
+        // 2. Cierra sesión para simular a un visitante normal (público)
+        auth()->logout();
+
+        // 3. Ahora sí visita el perfil público como cualquier persona
         $respuesta = $this->get(route('prestadores.show', $perfil))->assertOk();
 
         $this->assertCount(1, $respuesta->viewData('page')['props']['galeria']);
@@ -286,7 +292,7 @@ class FotosTest extends TestCase
 
     public function test_catalogo_incluye_las_fotos_del_servicio(): void
     {
-        [$user, , $servicio] = $this->prestador();
+        [$user,, $servicio] = $this->prestador();
         $this->actingAs($user)->post(route('servicios.fotos.store', $servicio), ['foto' => $this->foto()]);
 
         $props = $this->get(route('servicios.index'))->assertOk()->viewData('page')['props'];
@@ -298,7 +304,7 @@ class FotosTest extends TestCase
 
     public function test_prestador_sube_evidencia_en_progreso_y_queda_en_disco_privado_con_auditoria(): void
     {
-        [$prestador, , $servicio] = $this->prestador();
+        [$prestador,, $servicio] = $this->prestador();
         $pedido = $this->pedido($servicio, $this->cliente(), Pedido::EN_PROGRESO);
 
         $this->actingAs($prestador)
@@ -314,7 +320,7 @@ class FotosTest extends TestCase
 
     public function test_no_se_puede_subir_evidencia_si_el_estado_no_lo_permite(): void
     {
-        [$prestador, , $servicio] = $this->prestador();
+        [$prestador,, $servicio] = $this->prestador();
         $pedido = $this->pedido($servicio, $this->cliente(), Pedido::PENDIENTE);
 
         $this->actingAs($prestador)
@@ -324,7 +330,7 @@ class FotosTest extends TestCase
 
     public function test_cliente_solo_aporta_evidencia_cuando_el_trabajo_esta_completado(): void
     {
-        [, , $servicio] = $this->prestador();
+        [,, $servicio] = $this->prestador();
         $cliente = $this->cliente();
 
         $enCurso = $this->pedido($servicio, $cliente, Pedido::EN_PROGRESO);
@@ -340,7 +346,7 @@ class FotosTest extends TestCase
 
     public function test_un_tercero_no_puede_ver_ni_listar_la_evidencia(): void
     {
-        [$prestador, , $servicio] = $this->prestador();
+        [$prestador,, $servicio] = $this->prestador();
         $pedido = $this->pedido($servicio, $this->cliente(), Pedido::EN_PROGRESO);
         $this->actingAs($prestador)->post(route('evidencias.store', $pedido), ['foto' => $this->foto(), 'fase' => 'antes']);
 
@@ -353,7 +359,7 @@ class FotosTest extends TestCase
 
     public function test_las_partes_ven_la_evidencia_por_redireccion_a_url_firmada_sin_cache(): void
     {
-        [$prestador, , $servicio] = $this->prestador();
+        [$prestador,, $servicio] = $this->prestador();
         $cliente = $this->cliente();
         $pedido  = $this->pedido($servicio, $cliente, Pedido::EN_PROGRESO);
         $this->actingAs($prestador)->post(route('evidencias.store', $pedido), ['foto' => $this->foto(), 'fase' => 'antes']);
@@ -371,7 +377,7 @@ class FotosTest extends TestCase
 
     public function test_mediador_solo_ve_evidencia_en_disputa_y_deja_rastro(): void
     {
-        [$prestador, , $servicio] = $this->prestador();
+        [$prestador,, $servicio] = $this->prestador();
         $cliente = $this->cliente();
         $pedido  = $this->pedido($servicio, $cliente, Pedido::EN_PROGRESO);
         $this->actingAs($prestador)->post(route('evidencias.store', $pedido), ['foto' => $this->foto(), 'fase' => 'antes']);
@@ -390,7 +396,7 @@ class FotosTest extends TestCase
 
     public function test_solo_el_autor_elimina_su_evidencia_y_no_en_disputa(): void
     {
-        [$prestador, , $servicio] = $this->prestador();
+        [$prestador,, $servicio] = $this->prestador();
         $cliente = $this->cliente();
         $pedido  = $this->pedido($servicio, $cliente, Pedido::COMPLETADO);
         $this->actingAs($prestador)->post(route('evidencias.store', $pedido), ['foto' => $this->foto(), 'fase' => 'despues']);
@@ -410,7 +416,7 @@ class FotosTest extends TestCase
     public function test_evidencia_respeta_el_maximo_por_persona(): void
     {
         config(['marketplace.fotos.max_evidencias_por_parte' => 1]);
-        [$prestador, , $servicio] = $this->prestador();
+        [$prestador,, $servicio] = $this->prestador();
         $pedido = $this->pedido($servicio, $this->cliente(), Pedido::EN_PROGRESO);
 
         $this->actingAs($prestador)->post(route('evidencias.store', $pedido), ['foto' => $this->foto(), 'fase' => 'antes'])->assertCreated();
@@ -422,7 +428,7 @@ class FotosTest extends TestCase
 
     public function test_fotos_de_portafolio_son_independientes_de_las_de_evidencia(): void
     {
-        [$user, , $servicio] = $this->prestador();
+        [$user,, $servicio] = $this->prestador();
         $this->actingAs($user)->post(route('servicios.fotos.store', $servicio), ['foto' => $this->foto()]);
 
         $this->assertSame(1, FotoTrabajo::count());

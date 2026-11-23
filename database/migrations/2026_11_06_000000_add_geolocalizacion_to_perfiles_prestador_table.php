@@ -8,45 +8,37 @@ return new class extends Migration
 {
     /**
      * Ubicación del prestador para poder filtrar el catálogo por cercanía.
-     *
-     * En instalaciones nuevas, create_perfiles_prestador_table ya incluye estas
-     * columnas y el índice; aquí solo se agregan en bases antiguas que no los tienen.
      */
     public function up(): void
     {
-        $tabla = 'perfiles_prestador';
-
-        Schema::table($tabla, function (Blueprint $table) use ($tabla) {
-            if (! Schema::hasColumn($tabla, 'latitud')) {
+        Schema::table('perfiles_prestador', function (Blueprint $table) {
+            // Agregamos las columnas solo si no existen previamente
+            if (!Schema::hasColumn('perfiles_prestador', 'latitud')) {
                 $table->decimal('latitud', 10, 7)->nullable()->after('ubicacion_aproximada');
             }
-            if (! Schema::hasColumn($tabla, 'longitud')) {
+
+            if (!Schema::hasColumn('perfiles_prestador', 'longitud')) {
                 $table->decimal('longitud', 10, 7)->nullable()->after('latitud');
             }
-            if (! Schema::hasColumn($tabla, 'radio_cobertura_km')) {
+
+            if (!Schema::hasColumn('perfiles_prestador', 'radio_cobertura_km')) {
                 $table->unsignedSmallInteger('radio_cobertura_km')->default(10)->after('longitud');
             }
-            if (! Schema::hasIndex($tabla, 'perfiles_prestador_lat_lng_index')) {
-                $table->index(['latitud', 'longitud'], 'perfiles_prestador_lat_lng_index');
+
+            // Para el índice, verificamos si ya existe para evitar errores
+            $indexName = 'perfiles_prestador_lat_lng_index';
+            if (!collect(Schema::getIndexes('perfiles_prestador'))->pluck('name')->contains($indexName)) {
+                $table->index(['latitud', 'longitud'], $indexName);
             }
         });
     }
 
     public function down(): void
     {
-        $tabla = 'perfiles_prestador';
-
-        Schema::table($tabla, function (Blueprint $table) use ($tabla) {
-            if (Schema::hasIndex($tabla, 'perfiles_prestador_lat_lng_index')) {
-                $table->dropIndex('perfiles_prestador_lat_lng_index');
-            }
-            $columnas = array_values(array_filter(
-                ['latitud', 'longitud', 'radio_cobertura_km'],
-                fn ($c) => Schema::hasColumn($tabla, $c)
-            ));
-            if ($columnas) {
-                $table->dropColumn($columnas);
-            }
+        Schema::table('perfiles_prestador', function (Blueprint $table) {
+            // Eliminamos el índice y las columnas de forma segura
+            $table->dropIndex('perfiles_prestador_lat_lng_index');
+            $table->dropColumn(['latitud', 'longitud', 'radio_cobertura_km']);
         });
     }
 };

@@ -1,0 +1,20 @@
+PRUEBAS - OficiosYa / MarketPlace
+=================================
+Copia phpunit.xml y la carpeta tests/ a la raiz del proyecto (donde esta artisan).
+
+Ejecutar
+  php artisan test --exclude-group=db        # sin base de datos (siempre)
+  php artisan test --group=db                # con base de datos (marketplace_test)
+  php artisan test                           # todo
+
+Un caso del documento "Pruebas y diseño de casos":
+  php artisan test --group=CP-FUN-01
+  (CP-FUN-01, CN-FUN-02, CL-FUN-03, CP-INT-01, CP-INT-02, CN-SEG-01,
+   CN-SEG-02, CP-RES-01, CP-PUS-01, CP-UX-01)
+  php artisan test --group=pdf               # los 10 casos
+  php artisan test --group=duras             # pruebas duras sin BD
+  php artisan test --group=observacion       # seccion 7 del documento
+
+BD de pruebas
+  MySQL/ServBay: crea "marketplace_test" e importa marketplace.sql.
+  SQLite: ver el comentario al final de phpunit.xml.
