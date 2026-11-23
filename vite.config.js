@@ -48,6 +48,11 @@ export default defineConfig({
                     { url: '/icons/icon-192x192.png', revision: '1' },
                     { url: '/icons/icon-512x512.png', revision: '1' },
                     { url: '/images/logo.jpg', revision: '1' },
+                    // Pantalla splash (si cambias estas imágenes, sube la revisión)
+                    { url: '/images/splash/logo.svg', revision: '1' },
+                    { url: '/images/splash/pin.svg', revision: '1' },
+                    { url: '/images/splash/ya.svg', revision: '1' },
+                    { url: '/images/splash/ficios.svg', revision: '1' },
                 ],
             },
             devOptions: {
