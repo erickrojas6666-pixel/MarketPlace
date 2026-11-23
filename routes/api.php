@@ -2,6 +2,7 @@
 
 use App\Http\Controllers\Api\AuthApiController;
 use App\Http\Controllers\Api\BusquedaApiController;
+use App\Http\Controllers\Api\DisputaApiController;
 use App\Http\Controllers\Api\PagoApiController;
 use App\Http\Controllers\Api\PedidoApiController;
 use App\Http\Controllers\Api\ResenaApiController;
@@ -59,6 +60,12 @@ Route::middleware(['auth:sanctum', 'throttle:60,1'])->group(function () {
     Route::patch('pedidos/{pedido}/estado', [PedidoApiController::class, 'updateEstado'])
         ->whereNumber('pedido')
         ->name('api.pedidos.estado');
+
+    // 4b. Disputa del pedido (RF-38): el cliente la abre; el mediador resuelve desde el panel web.
+    Route::post('pedidos/{pedido}/disputa', [DisputaApiController::class, 'store'])
+        ->whereNumber('pedido')
+        ->middleware('throttle:10,1')
+        ->name('api.pedidos.disputa');
 
     // 5. Pagos (retención y liberación)
     Route::get('pagos', [PagoApiController::class, 'index'])->name('api.pagos.index');

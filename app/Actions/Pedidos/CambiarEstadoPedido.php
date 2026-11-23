@@ -51,15 +51,50 @@ class CambiarEstadoPedido
     }
 
     /**
+     * ¿La transición entra o sale de "en_disputa"? Esas transiciones tienen consecuencias
+     * (registro de la disputa, movimiento del dinero) y solo las aplica el flujo de disputas.
+     */
+    public static function involucraDisputa(?string $estadoActual, string $nuevoEstado): bool
+    {
+        return $estadoActual === Pedido::EN_DISPUTA || $nuevoEstado === Pedido::EN_DISPUTA;
+    }
+
+    /**
+     * Cambia el estado y avisa a las demás partes.
+     *
      * @param  list<string>  $actores
      * @return string|null mensaje de error, o null si el cambio se aplicó
      */
     public function ejecutar(Pedido $pedido, string $nuevoEstado, array $actores, ?User $usuario = null): ?string
     {
-        // La verificación del estado actual y el cambio van juntos y con el registro
-        // bloqueado: dos clics simultáneos no pueden saltarse el flujo.
-        $error = DB::transaction(function () use ($pedido, $nuevoEstado, $actores) {
+        $error = $this->aplicar($pedido, $nuevoEstado, $actores);
+
+        if ($error === null) {
+            $this->notificar($pedido, $nuevoEstado, $usuario);
+        }
+
+        return $error;
+    }
+
+    /**
+     * Núcleo transaccional del cambio, sin notificar: así un flujo mayor (disputas) puede
+     * incluirlo en SU transacción y avisar solo cuando todo quedó confirmado.
+     *
+     * La verificación del estado actual y el cambio van juntos y con el registro bloqueado:
+     * dos clics simultáneos no pueden saltarse el flujo.
+     *
+     * @param  list<string>  $actores
+     * @param  bool  $viaDisputa  solo los flujos de disputas lo pasan en true
+     * @return string|null mensaje de error, o null si el cambio se aplicó
+     */
+    public function aplicar(Pedido $pedido, string $nuevoEstado, array $actores, bool $viaDisputa = false): ?string
+    {
+        return DB::transaction(function () use ($pedido, $nuevoEstado, $actores, $viaDisputa) {
             $estadoActual = Pedido::whereKey($pedido->id)->lockForUpdate()->value('estado');
+
+            if (! $viaDisputa && self::involucraDisputa($estadoActual, $nuevoEstado)) {
+                return 'Las disputas se abren y se resuelven desde su propio flujo, no cambiando el estado a mano.';
+            }
 
             if (! TransicionesPedido::permite($estadoActual, $nuevoEstado, $actores)) {
                 return "No puedes cambiar un pedido '{$estadoActual}' a '{$nuevoEstado}'.";
@@ -77,16 +112,14 @@ class CambiarEstadoPedido
 
             return null;
         });
-
-        if ($error === null) {
-            $this->notificar($pedido, $nuevoEstado, $usuario);
-        }
-
-        return $error;
     }
 
-    /** Avisa a cliente y prestador, menos a quien hizo el cambio. */
-    private function notificar(Pedido $pedido, string $nuevoEstado, ?User $actor): void
+    /**
+     * Avisa a cliente y prestador, menos a quien hizo el cambio.
+     *
+     * @param  string|null  $detalle  frase breve y sin datos sensibles que acompaña al aviso
+     */
+    public function notificar(Pedido $pedido, string $nuevoEstado, ?User $actor, ?string $detalle = null): void
     {
         $pedido->loadMissing(['cliente', 'servicio.perfilPrestador.user']);
 
@@ -94,6 +127,6 @@ class CambiarEstadoPedido
             ->filter()
             ->reject(fn (User $u) => $actor !== null && $u->id === $actor->id)
             ->unique('id')
-            ->each(fn (User $u) => $u->notify(new EstadoPedidoActualizado($pedido, $nuevoEstado)));
+            ->each(fn (User $u) => $u->notify(new EstadoPedidoActualizado($pedido, $nuevoEstado, $detalle)));
     }
 }

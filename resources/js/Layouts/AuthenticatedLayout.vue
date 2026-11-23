@@ -12,6 +12,8 @@ const page = usePage()
 // Ambos flags los calcula HandleInertiaRequests a partir de los roles de Spatie.
 const esAdmin = computed(() => !!page.props.auth?.user?.esAdmin)
 const esPrestador = computed(() => !!page.props.auth?.user?.esPrestador)
+// Mediador o superadmin: ven la cola de disputas (rutas /mediacion).
+const esMediador = computed(() => !!page.props.auth?.user?.esMediador)
 const rol = computed(() => (esAdmin.value ? 'Admin' : esPrestador.value ? 'Prestador' : 'Cliente'))
 
 const cerrarMenu = () => (menuAbierto.value = false)
@@ -36,6 +38,7 @@ const iconos = {
   ],
   salir: ['M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1'],
   cerrar: ['M6 18L18 6M6 6l12 12'],
+  disputas: ['M3 6l3 1m0 0l-3 9a5.002 5.002 0 006.001 0M6 7l3 9M6 7l6-2m6 2l3-1m-3 1l-3 9a5.002 5.002 0 006.001 0M18 7l3 9m-3-9l-6-2m0-2v2m0 16V5m0 16H9m3 0h3'],
 }
 
 // Clases de los enlaces del menú superior (el enlace activo va en dorado)
@@ -62,6 +65,15 @@ const secciones = computed(() => {
       icono: 'explorar',
     },
   ]
+
+  if (esMediador.value) {
+    principal.push({
+      nombre: 'Disputas',
+      href: route('mediacion.disputas.index'),
+      activo: !!route().current('mediacion.*'),
+      icono: 'disputas',
+    })
+  }
 
   if (esPrestador.value) {
     principal.push({
@@ -150,6 +162,15 @@ const cajaEscritorioSalir =
                   Explorar Servicios
                 </Link>
 
+                <!-- Cola de disputas: solo mediador o superadmin -->
+                <Link
+                  v-if="esMediador"
+                  :href="route('mediacion.disputas.index')"
+                  :class="claseEnlace(route().current('mediacion.*'))"
+                >
+                  Disputas
+                </Link>
+
                 <!-- "Perfil Prestador" solo para usuarios con rol prestador -->
                 <Link
                   v-if="esPrestador"
@@ -157,14 +178,6 @@ const cajaEscritorioSalir =
                   :class="claseEnlace(route().current('prestador.perfil.edit'))"
                 >
                   Perfil Prestador
-                </Link>
-
-                <Link
-                  v-if="esPrestador"
-                  :href="route('prestador.verificacion.show')"
-                  :class="claseEnlace(route().current('prestador.verificacion.show'))"
-                >
-                  Verificación
                 </Link>
               </div>
             </div>
@@ -213,15 +226,6 @@ const cajaEscritorioSalir =
                         Perfil prestador
                       </Link>
 
-<<<<<<< HEAD
-                    <DropdownLink v-if="esPrestador" :href="route('prestador.verificacion.show')">
-                      Verificación de identidad
-                    </DropdownLink>
-
-                    <DropdownLink :href="route('profile.edit')">
-                      Ajustes de Cuenta
-                    </DropdownLink>
-=======
                       <Link :href="route('profile.edit')" :class="itemEscritorio">
                         <span :class="cajaEscritorio">
                           <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
@@ -230,7 +234,6 @@ const cajaEscritorioSalir =
                         </span>
                         Ajustes de cuenta
                       </Link>
->>>>>>> develop
 
                       <!-- Instalar la app (solo se ve en el navegador) -->
                       <InstalarApp variante="menu" />
@@ -332,26 +335,6 @@ const cajaEscritorioSalir =
               </div>
             </div>
 
-<<<<<<< HEAD
-            <div class="mt-3 space-y-1">
-              <ResponsiveNavLink v-if="esPrestador" :href="route('prestador.perfil.edit')" :active="route().current('prestador.perfil.edit')">
-                Mi Perfil de Prestador / Servicios
-              </ResponsiveNavLink>
-              <ResponsiveNavLink v-if="esPrestador" :href="route('prestador.verificacion.show')" :active="route().current('prestador.verificacion.show')">
-                Verificación de identidad
-              </ResponsiveNavLink>
-              <ResponsiveNavLink :href="route('profile.edit')">
-                Ajustes de Cuenta
-              </ResponsiveNavLink>
-              <ResponsiveNavLink
-                :href="route('logout')"
-                method="post"
-                as="button"
-              >
-                Cerrar Sesión
-              </ResponsiveNavLink>
-            </div>
-=======
             <!-- Secciones -->
             <template v-for="(sec, idx) in secciones" :key="sec.titulo">
               <div class="mt-5 first:mt-0">
@@ -381,7 +364,6 @@ const cajaEscritorioSalir =
               <!-- Instalar la app (solo se ve en el navegador) -->
               <InstalarApp v-if="idx === 0" variante="panel" />
             </template>
->>>>>>> develop
           </div>
         </aside>
       </Transition>

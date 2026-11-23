@@ -9,12 +9,12 @@ use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\FotoEvidenciaController;
 use App\Http\Controllers\FotoPerfilController;
 use App\Http\Controllers\FotoTrabajoController;
+use App\Http\Controllers\Mediacion\DisputaController;
 use App\Http\Controllers\PedidoController;
+use App\Http\Controllers\PedidoDisputaController;
 use App\Http\Controllers\PagoRetornoController;
 use App\Http\Controllers\PagoWebController;
 use App\Http\Controllers\PerfilPrestadorController;
-use App\Http\Controllers\VerificacionDocumentosController;
-use App\Http\Controllers\Admin\DocumentoVerificacionController;
 use App\Http\Controllers\PrestadorPublicoController;
 use App\Http\Controllers\ProfileController;
 use App\Http\Controllers\PushController;
@@ -59,6 +59,11 @@ Route::get('/dashboard', function (Request $request) {
 
     if ($user && ($user->is_admin ?? false)) {
         return redirect()->route('admin.dashboard');
+    }
+
+    // El mediador no contrata ni presta servicios: su trabajo está en la cola de disputas.
+    if ($user && $user->hasRole('mediador') && ! $user->hasAnyRole(['cliente', 'prestador'])) {
+        return redirect()->route('mediacion.disputas.index');
     }
 
     // Para clientes y prestadores, carga el Dashboard regular
@@ -121,6 +126,12 @@ Route::middleware('auth')->group(function () {
     Route::post('/pedidos', [PedidoController::class, 'store'])->name('pedidos.store');
     Route::patch('/pedidos/{pedido}/estado', [PedidoController::class, 'updateEstado'])->name('pedidos.updateEstado');
 
+    // Disputas (RF-38): el cliente reporta un problema con el trabajo completado
+    Route::post('/pedidos/{pedido}/disputa', [PedidoDisputaController::class, 'store'])
+        ->whereNumber('pedido')
+        ->middleware('throttle:10,1')
+        ->name('pedidos.disputa.store');
+
     // Pago del pedido (botón "Pagar") y regreso desde Mercado Pago
     Route::post('/pedidos/{pedido}/pagar', [PagoWebController::class, 'pagar'])
         ->middleware('throttle:20,1')
@@ -130,26 +141,30 @@ Route::middleware('auth')->group(function () {
     // Reseñas y Calificaciones (Clientes)
     Route::post('/resenas', [ResenaController::class, 'store'])->name('resenas.store');
 
+    // Mediación de disputas (RF-38): ver la evidencia de ambas partes y resolver.
+    // Solo mediador o superadmin; la política además excluye a quien sea parte del pedido.
+    Route::middleware('role:mediador|superadmin')
+        ->prefix('mediacion')
+        ->as('mediacion.')
+        ->group(function () {
+            Route::get('/disputas', [DisputaController::class, 'index'])->name('disputas.index');
+            Route::get('/disputas/{disputa}', [DisputaController::class, 'show'])
+                ->whereNumber('disputa')
+                ->name('disputas.show');
+            Route::post('/disputas/{disputa}/tomar', [DisputaController::class, 'tomar'])
+                ->whereNumber('disputa')
+                ->middleware('throttle:30,1')
+                ->name('disputas.tomar');
+            Route::post('/disputas/{disputa}/resolver', [DisputaController::class, 'resolver'])
+                ->whereNumber('disputa')
+                ->middleware('throttle:20,1')
+                ->name('disputas.resolver');
+        });
+
     // Solo usuarios con rol prestador: perfil profesional y publicación de servicios.
     Route::middleware('role:prestador')->group(function () {
         Route::get('/prestador/perfil', [PerfilPrestadorController::class, 'edit'])->name('prestador.perfil.edit');
         Route::post('/prestador/perfil', [PerfilPrestadorController::class, 'update'])->name('prestador.perfil.update');
-
-        // Verificación de identidad (RF-05, RF-06): INE y comprobante, cifrados en disco privado
-        Route::get('/prestador/verificacion', [VerificacionDocumentosController::class, 'show'])
-            ->name('prestador.verificacion.show');
-        Route::post('/prestador/verificacion/documentos', [VerificacionDocumentosController::class, 'store'])
-            ->middleware('throttle:20,1')
-            ->name('prestador.verificacion.documentos.store');
-        Route::get('/prestador/verificacion/documentos/{documento}', [VerificacionDocumentosController::class, 'ver'])
-            ->whereNumber('documento')
-            ->name('prestador.verificacion.documentos.ver');
-        Route::delete('/prestador/verificacion/documentos/{documento}', [VerificacionDocumentosController::class, 'destroy'])
-            ->whereNumber('documento')
-            ->name('prestador.verificacion.documentos.destroy');
-        Route::post('/prestador/verificacion/enviar', [VerificacionDocumentosController::class, 'enviar'])
-            ->middleware('throttle:5,1')
-            ->name('prestador.verificacion.enviar');
 
         Route::post('/servicios', [ServicioController::class, 'store'])->name('servicios.store');
         Route::patch('/servicios/{servicio}/toggle', [ServicioController::class, 'toggleState'])->name('servicios.toggle');
@@ -183,18 +198,6 @@ Route::middleware(['auth', 'role:admin|superadmin|Admin|SuperAdmin'])
         Route::get('/prestadores', [VerificacionPrestadorController::class, 'index'])->name('prestadores.index');
         Route::get('/prestadores/{perfil}', [VerificacionPrestadorController::class, 'show'])->name('prestadores.show');
         Route::patch('/prestadores/{perfil}/estado', [VerificacionPrestadorController::class, 'updateStatus'])->name('prestadores.updateStatus');
-
-        // Revisión de documentos (RF-07, RF-49): motivo obligatorio y cada lectura auditada
-        Route::post('/prestadores/{perfil}/documentos/acceso', [DocumentoVerificacionController::class, 'acceso'])
-            ->whereNumber('perfil')
-            ->middleware('throttle:30,1')
-            ->name('documentos.acceso');
-        Route::get('/documentos/{documento}', [DocumentoVerificacionController::class, 'ver'])
-            ->whereNumber('documento')
-            ->name('documentos.ver');
-        Route::patch('/documentos/{documento}', [DocumentoVerificacionController::class, 'revisar'])
-            ->whereNumber('documento')
-            ->name('documentos.revisar');
 
         // CRUDs de Gestión
         Route::resource('categorias', CategoriaController::class)->except(['show', 'create', 'edit']);

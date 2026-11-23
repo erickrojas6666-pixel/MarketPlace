@@ -10,7 +10,6 @@ const props = defineProps({
   pedidosPorEstado: { type: Object, default: () => ({}) },
   totalPedidos: { type: Number, default: 0 },
   resenas: { type: Object, default: () => ({ promedio: null, total: 0 }) },
-<<<<<<< HEAD
   documentos: { type: Array, default: () => [] },
   tiposRequeridos: { type: Array, default: () => [] },
   acceso: { type: Object, default: () => ({ activo: false, motivo: null, hasta: null }) },
@@ -91,30 +90,6 @@ const procesarVerificacion = () => {
   })
 }
 
-=======
-})
-
-/* ---------- Aprobar / rechazar (misma lógica que la tabla de prestadores) ---------- */
-const mostrarModal = ref(false)
-const accionVerificacion = ref('')
-
-const abrirModal = (accion) => {
-  accionVerificacion.value = accion
-  mostrarModal.value = true
-}
-
-const procesarVerificacion = () => {
-  router.patch(route('admin.prestadores.updateStatus', props.perfil.id), {
-    estado: accionVerificacion.value,
-  }, {
-    preserveScroll: true,
-    onSuccess: () => {
-      mostrarModal.value = false
-    },
-  })
-}
-
->>>>>>> develop
 const esAprobacion = computed(() => accionVerificacion.value === 'aprobado')
 
 /* ---------- Datos listos para mostrar ---------- */

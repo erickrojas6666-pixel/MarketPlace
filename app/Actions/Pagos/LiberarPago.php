@@ -30,58 +30,70 @@ class LiberarPago
             // Quien no es parte (ni administrador) no debe saber que el pago existe.
             abort_unless($esCliente || $actor->hasAnyRole(['admin', 'superadmin']), 404);
 
-            if ($pago->estado !== 'completado') {
-                throw ValidationException::withMessages([
-                    'pago_id' => 'Este pago no está disponible para liberarse.',
-                ]);
-            }
-
-            if ($pedido->estado !== Pedido::CONFIRMADO) {
-                throw ValidationException::withMessages([
-                    'pago_id' => 'El pago solo se libera cuando el trabajo está confirmado.',
-                ]);
-            }
-
-            $yaLiberado = Transaccione::where('pago_id', $pago->id)
-                ->where('tipo', 'liberacion_prestador')
-                ->exists();
-
-            if ($yaLiberado) {
-                throw ValidationException::withMessages([
-                    'pago_id' => 'Este pago ya fue liberado.',
-                ]);
-            }
-
-            $monto    = (float) $pago->monto;
-            $pct      = max(0.0, min(100.0, (float) config('marketplace.comision_porcentaje')));
-            $comision = round($monto * $pct / 100, 2);
-            $neto     = round($monto - $comision, 2);
-
-            Transaccione::create([
-                'pago_id'   => $pago->id,
-                'tipo'      => 'liberacion_prestador',
-                'monto'     => $neto,
-                'creada_en' => now(),
-            ]);
-
-            if ($comision > 0) {
-                Transaccione::create([
-                    'pago_id'   => $pago->id,
-                    'tipo'      => 'comision_plataforma',
-                    'monto'     => $comision,
-                    'creada_en' => now(),
-                ]);
-            }
-
-            Auditoria::registrar(
-                'pago.liberado',
-                'pago',
-                $pago->id,
-                ['estado' => 'retenido'],
-                ['estado' => 'liberado', 'comision' => $comision, 'neto' => $neto],
-            );
+            $this->aplicar($pago, $pedido);
         });
 
         return Pago::with('transacciones')->findOrFail($pagoId);
+    }
+
+    /**
+     * Núcleo de la liberación: valida y escribe los movimientos del libro.
+     *
+     * Quien lo llame decide QUIÉN está autorizado y debe hacerlo dentro de una transacción
+     * y con el pago bloqueado (lockForUpdate). Lo usan el cliente/administrador (ejecutar)
+     * y el mediador al resolver una disputa a favor del prestador.
+     */
+    public function aplicar(Pago $pago, Pedido $pedido): void
+    {
+        if ($pago->estado !== 'completado') {
+            throw ValidationException::withMessages([
+                'pago_id' => 'Este pago no está disponible para liberarse.',
+            ]);
+        }
+
+        if ($pedido->estado !== Pedido::CONFIRMADO) {
+            throw ValidationException::withMessages([
+                'pago_id' => 'El pago solo se libera cuando el trabajo está confirmado.',
+            ]);
+        }
+
+        $yaLiberado = Transaccione::where('pago_id', $pago->id)
+            ->where('tipo', 'liberacion_prestador')
+            ->exists();
+
+        if ($yaLiberado) {
+            throw ValidationException::withMessages([
+                'pago_id' => 'Este pago ya fue liberado.',
+            ]);
+        }
+
+        $monto    = (float) $pago->monto;
+        $pct      = max(0.0, min(100.0, (float) config('marketplace.comision_porcentaje')));
+        $comision = round($monto * $pct / 100, 2);
+        $neto     = round($monto - $comision, 2);
+
+        Transaccione::create([
+            'pago_id'   => $pago->id,
+            'tipo'      => 'liberacion_prestador',
+            'monto'     => $neto,
+            'creada_en' => now(),
+        ]);
+
+        if ($comision > 0) {
+            Transaccione::create([
+                'pago_id'   => $pago->id,
+                'tipo'      => 'comision_plataforma',
+                'monto'     => $comision,
+                'creada_en' => now(),
+            ]);
+        }
+
+        Auditoria::registrar(
+            'pago.liberado',
+            'pago',
+            $pago->id,
+            ['estado' => 'retenido'],
+            ['estado' => 'liberado', 'comision' => $comision, 'neto' => $neto],
+        );
     }
 }
