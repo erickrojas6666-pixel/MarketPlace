@@ -337,7 +337,6 @@ const iconos = {
             </p>
           </section>
 
-<<<<<<< HEAD
           <!-- Documentos de identidad -->
           <section class="bg-white rounded-3xl p-6 sm:p-8 border-2 border-slate-200/90 shadow-md space-y-5">
             <div>
@@ -420,8 +419,6 @@ const iconos = {
             </template>
           </section>
 
-=======
->>>>>>> develop
           <!-- Servicios publicados -->
           <section class="bg-white rounded-3xl p-6 sm:p-8 border-2 border-slate-200/90 shadow-md space-y-5">
             <div class="flex items-center justify-between gap-4">
@@ -577,7 +574,6 @@ const iconos = {
               </p>
             </div>
 
-<<<<<<< HEAD
             <div v-if="!esAprobacion" class="text-left space-y-1.5">
               <label for="motivo-rechazo" class="text-xs font-bold text-principal">Motivo del rechazo (lo verá el prestador)</label>
               <textarea
@@ -591,8 +587,6 @@ const iconos = {
               <p v-if="errorMotivo" class="text-xs font-semibold text-red-600" role="alert">{{ errorMotivo }}</p>
             </div>
 
-=======
->>>>>>> develop
             <div class="flex gap-3 pt-2">
               <button
                 type="button"
