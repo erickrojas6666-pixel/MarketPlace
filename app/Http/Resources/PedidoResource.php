@@ -18,8 +18,13 @@ class PedidoResource extends JsonResource
         return [
             'id'     => $this->id,
             'estado' => $this->estado,
-            // Estados a los que ESTE usuario puede mover el pedido ahora mismo.
-            'acciones_permitidas' => TransicionesPedido::permitidas($this->estado, $actores),
+            // Estados a los que ESTE usuario puede mover el pedido ahora mismo. Entrar o salir
+            // de "en_disputa" no es una acción manual: se hace con POST /pedidos/{id}/disputa
+            // (cliente) o desde el panel de mediación.
+            'acciones_permitidas' => array_values(array_filter(
+                TransicionesPedido::permitidas($this->estado, $actores),
+                fn (string $destino) => ! CambiarEstadoPedido::involucraDisputa($this->estado, $destino),
+            )),
             'servicio' => $this->whenLoaded('servicio', fn () => [
                 'id'          => $this->servicio->id,
                 'titulo'      => $this->servicio->titulo,

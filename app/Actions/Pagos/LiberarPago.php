@@ -37,6 +37,23 @@ class LiberarPago
     }
 
     /**
+     * Reparto de un monto al liberarlo: comisión de la plataforma y neto para el prestador.
+     * Única fuente de esta regla (la usan la liberación y la ficha del mediador).
+     *
+     * @return array{comision: float, neto: float}
+     */
+    public static function desglose(float $monto): array
+    {
+        $pct      = max(0.0, min(100.0, (float) config('marketplace.comision_porcentaje')));
+        $comision = round($monto * $pct / 100, 2);
+
+        return [
+            'comision' => $comision,
+            'neto'     => round($monto - $comision, 2),
+        ];
+    }
+
+    /**
      * Núcleo de la liberación: valida y escribe los movimientos del libro.
      *
      * Quien lo llame decide QUIÉN está autorizado y debe hacerlo dentro de una transacción
@@ -67,10 +84,7 @@ class LiberarPago
             ]);
         }
 
-        $monto    = (float) $pago->monto;
-        $pct      = max(0.0, min(100.0, (float) config('marketplace.comision_porcentaje')));
-        $comision = round($monto * $pct / 100, 2);
-        $neto     = round($monto - $comision, 2);
+        ['comision' => $comision, 'neto' => $neto] = self::desglose((float) $pago->monto);
 
         Transaccione::create([
             'pago_id'   => $pago->id,

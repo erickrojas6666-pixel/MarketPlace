@@ -49,11 +49,15 @@ class HandleInertiaRequests extends Middleware
                     'esCliente'   => $user->hasRole('cliente'),
                     // Coincide con las rutas /admin (role:admin|superadmin|...).
                     'esAdmin'     => $user->hasAnyRole(['admin', 'superadmin']),
+                    // Mediador o superadmin: ven la cola de disputas (/mediacion).
+                    'esMediador'  => $user->hasAnyRole(['mediador', 'superadmin']),
                 ] : null,
             ],
 
             'marketplace' => [
-                'horasConfirmacion' => (int) config('marketplace.horas_confirmacion_automatica'),
+                'horasConfirmacion'   => (int) config('marketplace.horas_confirmacion_automatica'),
+                // Sin esto el cliente solo puede confirmar el trabajo (no ve "Abrir disputa").
+                'disputasHabilitadas' => (bool) config('marketplace.disputas_habilitadas'),
             ],
 
             // Lo lee Components/Toast.vue (page.props.flash).

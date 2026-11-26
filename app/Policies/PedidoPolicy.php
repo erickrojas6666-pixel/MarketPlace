@@ -2,10 +2,11 @@
 
 namespace App\Policies;
 
+use App\Models\Disputa;
 use App\Models\Pedido;
 use App\Models\User;
 
-/** Quién ve y quién sube la evidencia fotográfica de un pedido. */
+/** Quién ve y quién sube la evidencia fotográfica de un pedido, y quién abre una disputa. */
 class PedidoPolicy
 {
     /** Estados en los que cada parte puede aportar evidencia. */
@@ -38,6 +39,18 @@ class PedidoPolicy
 
         return $pedido->estado === Pedido::EN_DISPUTA
             && $user->hasAnyRole(['mediador', 'superadmin']);
+    }
+
+    /**
+     * Solo el cliente del pedido, con el trabajo completado, una única vez y con el módulo
+     * encendido (MARKETPLACE_DISPUTAS). El resto de los casos se rechaza con 403.
+     */
+    public function abrirDisputa(User $user, Pedido $pedido): bool
+    {
+        return (bool) config('marketplace.disputas_habilitadas')
+            && self::esCliente($user, $pedido)
+            && $pedido->estado === Pedido::COMPLETADO
+            && ! Disputa::where('pedido_id', $pedido->id)->exists();
     }
 
     public function subirEvidencia(User $user, Pedido $pedido): bool
