@@ -1,0 +1,209 @@
+diff --git a/app/Models/Mensaje.php b/app/Models/Mensaje.php
+index 3e7b31c..70ebb41 100644
+--- a/app/Models/Mensaje.php
++++ b/app/Models/Mensaje.php
+@@ -1,53 +1,58 @@
+ <?php
+ 
+-/**
+- * Created by Reliese Model.
+- */
+-
+ namespace App\Models;
+ 
+-use Carbon\Carbon;
+ use Illuminate\Database\Eloquent\Model;
++use Illuminate\Database\Eloquent\Relations\BelongsTo;
+ 
+ /**
+- * Class Mensaje
+- * 
++ * Mensaje del chat de un pedido (RF-22).
++ *
++ * Las columnas son las de la migración de `mensajes` (emisor_id, contenido) más las que
++ * agrega 2026_11_24_000001_alinear_mensajes_para_el_chat (adjunto_*, leido_at).
++ * El adjunto es una imagen en el disco PRIVADO: la ruta y el hash nunca viajan al
++ * cliente (igual que en FotoEvidencia); se lee con URL firmada tras autorizar.
++ *
+  * @property int $id
+  * @property int $pedido_id
+- * @property int $autor_id
+- * @property string $cuerpo
++ * @property int $emisor_id
++ * @property string $contenido  puede ser '' si el mensaje es solo una imagen
+  * @property string|null $adjunto_ruta
+- * @property Carbon|null $created_at
+- * 
+- * @property User $user
+- * @property Pedido $pedido
+- *
+- * @package App\Models
++ * @property string|null $adjunto_hash
++ * @property \Carbon\Carbon|null $leido_at
++ * @property \Carbon\Carbon|null $created_at
++ * @property \Carbon\Carbon|null $updated_at
++ * @property-read User $emisor
++ * @property-read Pedido $pedido
+  */
+ class Mensaje extends Model
+ {
+-	protected $table = 'mensajes';
+-	public $timestamps = false;
+-
+-	protected $casts = [
+-		'pedido_id' => 'int',
+-		'autor_id' => 'int'
+-	];
+-
+-	protected $fillable = [
+-		'pedido_id',
+-		'autor_id',
+-		'cuerpo',
+-		'adjunto_ruta'
+-	];
+-
+-	public function user()
+-	{
+-		return $this->belongsTo(User::class, 'autor_id');
+-	}
+-
+-	public function pedido()
+-	{
+-		return $this->belongsTo(Pedido::class);
+-	}
++    protected $table = 'mensajes';
++
++    protected $fillable = [
++        'pedido_id',
++        'emisor_id',
++        'contenido',
++        'adjunto_ruta',
++        'adjunto_hash',
++    ];
++
++    /** leido_at NO es asignable en masa: solo lo marca el flujo de lectura. */
++    protected $hidden = ['adjunto_ruta', 'adjunto_hash'];
++
++    protected $casts = [
++        'pedido_id' => 'integer',
++        'emisor_id' => 'integer',
++        'leido_at'  => 'datetime',
++    ];
++
++    public function emisor(): BelongsTo
++    {
++        return $this->belongsTo(User::class, 'emisor_id');
++    }
++
++    public function pedido(): BelongsTo
++    {
++        return $this->belongsTo(Pedido::class, 'pedido_id');
++    }
+ }
+diff --git a/app/Models/Pedido.php b/app/Models/Pedido.php
+index 36f769e..7dbbb17 100644
+--- a/app/Models/Pedido.php
++++ b/app/Models/Pedido.php
+@@ -122,4 +122,10 @@ public function resenas(): HasMany
+     {
+         return $this->hasMany(Resena::class);
+     }
++
++    /** Chat del pedido (RF-22), en orden de envío. */
++    public function mensajes(): HasMany
++    {
++        return $this->hasMany(Mensaje::class, 'pedido_id')->orderBy('id');
++    }
+ }
+\ No newline at end of file
+diff --git a/database/migrations/2026_11_24_000001_alinear_mensajes_para_el_chat.php b/database/migrations/2026_11_24_000001_alinear_mensajes_para_el_chat.php
+new file mode 100644
+index 0000000..18ab4d1
+--- /dev/null
++++ b/database/migrations/2026_11_24_000001_alinear_mensajes_para_el_chat.php
+@@ -0,0 +1,42 @@
++<?php
++
++use Illuminate\Database\Migrations\Migration;
++use Illuminate\Database\Schema\Blueprint;
++use Illuminate\Support\Facades\Schema;
++
++return new class extends Migration
++{
++    /**
++     * Chat por pedido (RF-22). La tabla se creó en 2026_11_09_000006 y ningún código la
++     * usaba todavía, así que se ajusta sin migrar datos:
++     *  - adjunto_ruta / adjunto_hash: imagen opcional (disco privado, mismo trato que la evidencia).
++     *  - leido_at: reemplaza al booleano `leido` y dice CUÁNDO se leyó (sirve para "no leídos").
++     *  - índice (pedido_id, id): paginar "mensajes después del id N" sin recorrer toda la tabla.
++     */
++    public function up(): void
++    {
++        Schema::table('mensajes', function (Blueprint $table) {
++            $table->string('adjunto_ruta')->nullable()->after('contenido');
++            $table->string('adjunto_hash', 64)->nullable()->after('adjunto_ruta');
++            $table->timestamp('leido_at')->nullable()->after('adjunto_hash');
++
++            $table->index(['pedido_id', 'id'], 'idx_mensajes_pedido_id');
++        });
++
++        Schema::table('mensajes', function (Blueprint $table) {
++            $table->dropColumn('leido');
++        });
++    }
++
++    public function down(): void
++    {
++        Schema::table('mensajes', function (Blueprint $table) {
++            $table->boolean('leido')->default(false)->after('contenido');
++        });
++
++        Schema::table('mensajes', function (Blueprint $table) {
++            $table->dropIndex('idx_mensajes_pedido_id');
++            $table->dropColumn(['adjunto_ruta', 'adjunto_hash', 'leido_at']);
++        });
++    }
++};
+diff --git a/tests/Feature/EsquemaModelosTest.php b/tests/Feature/EsquemaModelosTest.php
+new file mode 100644
+index 0000000..a1d7d47
+--- /dev/null
++++ b/tests/Feature/EsquemaModelosTest.php
+@@ -0,0 +1,37 @@
++<?php
++
++namespace Tests\Feature;
++
++use App\Models\Mensaje;
++use Illuminate\Foundation\Testing\RefreshDatabase;
++use Illuminate\Support\Facades\Schema;
++use Tests\TestCase;
++
++/**
++ * Evita que un modelo declare columnas que la base de datos no tiene (pasó con Mensaje:
++ * el modelo hablaba de autor_id/cuerpo y la tabla tenía emisor_id/contenido).
++ *
++ * Agrega aquí cada modelo cuando su $fillable esté alineado con las migraciones.
++ */
++class EsquemaModelosTest extends TestCase
++{
++    use RefreshDatabase;
++
++    public function test_el_fillable_de_cada_modelo_existe_como_columna(): void
++    {
++        foreach ([Mensaje::class] as $clase) {
++            $modelo = new $clase;
++
++            $this->assertTrue(
++                Schema::hasColumns($modelo->getTable(), $modelo->getFillable()),
++                "{$clase}: hay columnas en \$fillable que no existen en la tabla {$modelo->getTable()}."
++            );
++        }
++    }
++
++    public function test_mensajes_no_conserva_el_booleano_leido_y_si_leido_at(): void
++    {
++        $this->assertTrue(Schema::hasColumns('mensajes', ['emisor_id', 'contenido', 'adjunto_ruta', 'adjunto_hash', 'leido_at']));
++        $this->assertFalse(Schema::hasColumn('mensajes', 'leido'));
++    }
++}

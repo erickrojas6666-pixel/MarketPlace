@@ -1,53 +1,58 @@
 <?php
 
-/**
- * Created by Reliese Model.
- */
-
 namespace App\Models;
 
-use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 /**
- * Class Mensaje
- * 
+ * Mensaje del chat de un pedido (RF-22).
+ *
+ * Las columnas son las de la migración de `mensajes` (emisor_id, contenido) más las que
+ * agrega 2026_11_24_000001_alinear_mensajes_para_el_chat (adjunto_*, leido_at).
+ * El adjunto es una imagen en el disco PRIVADO: la ruta y el hash nunca viajan al
+ * cliente (igual que en FotoEvidencia); se lee con URL firmada tras autorizar.
+ *
  * @property int $id
  * @property int $pedido_id
- * @property int $autor_id
- * @property string $cuerpo
+ * @property int $emisor_id
+ * @property string $contenido  puede ser '' si el mensaje es solo una imagen
  * @property string|null $adjunto_ruta
- * @property Carbon|null $created_at
- * 
- * @property User $user
- * @property Pedido $pedido
- *
- * @package App\Models
+ * @property string|null $adjunto_hash
+ * @property \Carbon\Carbon|null $leido_at
+ * @property \Carbon\Carbon|null $created_at
+ * @property \Carbon\Carbon|null $updated_at
+ * @property-read User $emisor
+ * @property-read Pedido $pedido
  */
 class Mensaje extends Model
 {
-	protected $table = 'mensajes';
-	public $timestamps = false;
+    protected $table = 'mensajes';
 
-	protected $casts = [
-		'pedido_id' => 'int',
-		'autor_id' => 'int'
-	];
+    protected $fillable = [
+        'pedido_id',
+        'emisor_id',
+        'contenido',
+        'adjunto_ruta',
+        'adjunto_hash',
+    ];
 
-	protected $fillable = [
-		'pedido_id',
-		'autor_id',
-		'cuerpo',
-		'adjunto_ruta'
-	];
+    /** leido_at NO es asignable en masa: solo lo marca el flujo de lectura. */
+    protected $hidden = ['adjunto_ruta', 'adjunto_hash'];
 
-	public function user()
-	{
-		return $this->belongsTo(User::class, 'autor_id');
-	}
+    protected $casts = [
+        'pedido_id' => 'integer',
+        'emisor_id' => 'integer',
+        'leido_at'  => 'datetime',
+    ];
 
-	public function pedido()
-	{
-		return $this->belongsTo(Pedido::class);
-	}
+    public function emisor(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'emisor_id');
+    }
+
+    public function pedido(): BelongsTo
+    {
+        return $this->belongsTo(Pedido::class, 'pedido_id');
+    }
 }

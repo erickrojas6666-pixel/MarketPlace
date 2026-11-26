@@ -1,6 +1,6 @@
 <script setup>
 import { ref, computed, onMounted, watch } from 'vue'
-import { Head, router, useForm, usePage } from '@inertiajs/vue3'
+import { Head, Link, router, useForm, usePage } from '@inertiajs/vue3'
 import AuthenticatedLayout from '@/Layouts/AuthenticatedLayout.vue'
 import BuscadorUbicacion from '@/Components/BuscadorUbicacion.vue'
 import EvidenciaPedido from '@/Components/EvidenciaPedido.vue'
@@ -431,14 +431,17 @@ const marcarNotificacionesLeidas = () => {
                 Hola, <span class="text-acento">{{ nombreUsuario }}</span>
               </h1>
 
-              <span
+              <Link
                 v-if="perfil?.estado_verificacion"
-                class="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full text-[11px] font-bold uppercase tracking-wider border"
+                :href="route('prestador.verificacion.show')"
+                class="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full text-[11px] font-bold uppercase tracking-wider border hover:brightness-110 transition"
                 :class="estiloVerificacion.badge"
+                title="Ver o completar mi verificación de identidad"
               >
                 <span class="w-1.5 h-1.5 rounded-full" :class="estiloVerificacion.punto"></span>
                 Perfil {{ perfil.estado_verificacion }}
-              </span>
+                <template v-if="perfil.estado_verificacion !== 'verificado'"> · completar →</template>
+              </Link>
             </div>
 
             <div class="flex gap-3">

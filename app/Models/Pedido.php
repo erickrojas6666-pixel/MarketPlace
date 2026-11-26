@@ -122,4 +122,10 @@ class Pedido extends Model
     {
         return $this->hasMany(Resena::class);
     }
+
+    /** Chat del pedido (RF-22), en orden de envío. */
+    public function mensajes(): HasMany
+    {
+        return $this->hasMany(Mensaje::class, 'pedido_id')->orderBy('id');
+    }
 }
