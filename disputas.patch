@@ -1,0 +1,1443 @@
+diff --git a/app/Actions/Disputas/AbrirDisputa.php b/app/Actions/Disputas/AbrirDisputa.php
+new file mode 100644
+index 0000000..3b2d8fd
+--- /dev/null
++++ b/app/Actions/Disputas/AbrirDisputa.php
+@@ -0,0 +1,68 @@
++<?php
++
++namespace App\Actions\Disputas;
++
++use App\Actions\Pedidos\CambiarEstadoPedido;
++use App\Models\Disputa;
++use App\Models\Pedido;
++use App\Models\User;
++use App\Support\Auditoria;
++use App\Support\Pedidos\TransicionesPedido;
++use Illuminate\Support\Facades\DB;
++use Illuminate\Validation\ValidationException;
++
++/**
++ * El cliente reporta un problema con un pedido completado (RF-38).
++ *
++ * El pedido pasa a "en_disputa" y se crea el registro de la disputa en la misma transacción.
++ * El pago NO se mueve: sigue retenido hasta que un mediador decida.
++ * Quien llama debe haber comprobado ya la autorización (PedidoPolicy::abrirDisputa).
++ */
++class AbrirDisputa
++{
++    public function __construct(private readonly CambiarEstadoPedido $cambiarEstado)
++    {
++    }
++
++    public function ejecutar(User $cliente, Pedido $pedido, string $motivo): Disputa
++    {
++        $disputa = DB::transaction(function () use ($cliente, $pedido, $motivo) {
++            // El cambio de estado verifica la transición con el pedido bloqueado: dos clics
++            // simultáneos no pueden abrir dos disputas.
++            $error = $this->cambiarEstado->aplicar(
++                $pedido,
++                Pedido::EN_DISPUTA,
++                [TransicionesPedido::CLIENTE],
++                viaDisputa: true,
++            );
++
++            if ($error !== null) {
++                throw ValidationException::withMessages(['pedido_id' => $error]);
++            }
++
++            $disputa = Disputa::create([
++                'pedido_id'   => $pedido->id,
++                'abierta_por' => $cliente->id,
++                'motivo'      => $motivo,
++                'estado'      => Disputa::ABIERTA,
++            ]);
++
++            Auditoria::registrar('disputa.abierta', 'disputa', $disputa->id, null, [
++                'pedido_id' => $pedido->id,
++                'estado'    => Disputa::ABIERTA,
++            ]);
++
++            return $disputa;
++        });
++
++        // Ya confirmado todo: se avisa al prestador (quien reclama no necesita aviso).
++        $this->cambiarEstado->notificar(
++            $pedido,
++            Pedido::EN_DISPUTA,
++            $cliente,
++            'El cliente reportó un problema. Aporta tus fotos de evidencia.',
++        );
++
++        return $disputa;
++    }
++}
+diff --git a/app/Actions/Disputas/DisputaException.php b/app/Actions/Disputas/DisputaException.php
+new file mode 100644
+index 0000000..24e80ff
+--- /dev/null
++++ b/app/Actions/Disputas/DisputaException.php
+@@ -0,0 +1,13 @@
++<?php
++
++namespace App\Actions\Disputas;
++
++use RuntimeException;
++
++/**
++ * Regla de negocio de las disputas que impide la acción (caso ya resuelto, caso tomado por
++ * otro mediador…). El mensaje está pensado para mostrarse tal cual al mediador.
++ */
++class DisputaException extends RuntimeException
++{
++}
+diff --git a/app/Actions/Disputas/ResolverDisputa.php b/app/Actions/Disputas/ResolverDisputa.php
+new file mode 100644
+index 0000000..c2cff7e
+--- /dev/null
++++ b/app/Actions/Disputas/ResolverDisputa.php
+@@ -0,0 +1,114 @@
++<?php
++
++namespace App\Actions\Disputas;
++
++use App\Actions\Pagos\LiberarPago;
++use App\Actions\Pagos\ReembolsarPago;
++use App\Actions\Pedidos\CambiarEstadoPedido;
++use App\Models\Disputa;
++use App\Models\Pago;
++use App\Models\Pedido;
++use App\Models\User;
++use App\Support\Auditoria;
++use App\Support\Pedidos\TransicionesPedido;
++use Illuminate\Support\Facades\DB;
++
++/**
++ * El mediador decide la disputa y se cierra el escrow (RF-38):
++ *
++ *  - favor_prestador → pedido "confirmado" y se libera el pago (neto + comisión).
++ *  - favor_cliente   → pedido "cancelado" y se reembolsa el pago completo, sin comisión.
++ *
++ * Todo ocurre en UNA transacción con la disputa y el pago bloqueados. El movimiento del
++ * dinero va al final: si la pasarela falla (Mercado Pago), la excepción deshace también el
++ * cambio de pedido y de disputa, y el mediador puede reintentar sin que nada quede a medias.
++ * Quien llama debe haber comprobado ya la autorización (DisputaPolicy::mediar).
++ */
++class ResolverDisputa
++{
++    public function __construct(
++        private readonly CambiarEstadoPedido $cambiarEstado,
++        private readonly LiberarPago $liberarPago,
++        private readonly ReembolsarPago $reembolsarPago,
++    ) {
++    }
++
++    /**
++     * @param  string  $decision  Disputa::FAVOR_CLIENTE o Disputa::FAVOR_PRESTADOR
++     *
++     * @throws DisputaException                     caso ya resuelto o tomado por otro mediador
++     * @throws \Illuminate\Validation\ValidationException  el pago no se puede liberar o reembolsar
++     * @throws \Symfony\Component\HttpKernel\Exception\HttpException  502 si la pasarela rechaza la devolución
++     */
++    public function ejecutar(User $mediador, int $disputaId, string $decision, string $notas): Disputa
++    {
++        $aFavorDelCliente = $decision === Disputa::FAVOR_CLIENTE;
++        $estadoPedido     = $aFavorDelCliente ? Pedido::CANCELADO : Pedido::CONFIRMADO;
++        $estadoDisputa    = $aFavorDelCliente ? Disputa::RESUELTA_FAVOR_CLIENTE : Disputa::RESUELTA_FAVOR_PRESTADOR;
++
++        $resultado = DB::transaction(function () use ($mediador, $disputaId, $decision, $notas, $aFavorDelCliente, $estadoPedido, $estadoDisputa) {
++            $disputa = Disputa::whereKey($disputaId)->lockForUpdate()->firstOrFail();
++
++            if (! $disputa->estaAbierta()) {
++                throw new DisputaException('Esta disputa ya fue resuelta.');
++            }
++
++            if (! $disputa->puedeSerGestionadaPor($mediador)) {
++                throw new DisputaException('Otro mediador ya tomó este caso.');
++            }
++
++            $pedido  = Pedido::with('servicio.perfilPrestador')->findOrFail($disputa->pedido_id);
++            $actores = CambiarEstadoPedido::actoresDe($mediador, $pedido);
++
++            // Defensa en profundidad: quien es parte del pedido no actúa como mediador.
++            abort_unless(in_array(TransicionesPedido::MEDIADOR, $actores, true), 403);
++
++            $error = $this->cambiarEstado->aplicar($pedido, $estadoPedido, $actores, viaDisputa: true);
++
++            if ($error !== null) {
++                throw new DisputaException($error);
++            }
++
++            $antes = ['estado' => $disputa->estado, 'mediador_id' => $disputa->mediador_id];
++
++            $disputa->update([
++                'estado'           => $estadoDisputa,
++                'mediador_id'      => $mediador->id,
++                'resolucion_notas' => $notas,
++            ]);
++
++            // Solo la decisión y el actor: el texto de las notas no se copia a la auditoría.
++            Auditoria::registrar('disputa.resuelta', 'disputa', $disputa->id, $antes, [
++                'estado'      => $estadoDisputa,
++                'decision'    => $decision,
++                'mediador_id' => $mediador->id,
++            ]);
++
++            // El dinero, al final. Sin pago cobrado (o ya movido) solo se cierra el pedido.
++            $pago = Pago::where('pedido_id', $pedido->id)->lockForUpdate()->first();
++
++            if ($pago !== null && $pago->estado === 'completado') {
++                if ($aFavorDelCliente) {
++                    // Clave estable: si hay que reintentar, Mercado Pago reconoce la misma devolución.
++                    $this->reembolsarPago->aplicar($pago, $pedido, "disputa-{$disputa->id}-pago-{$pago->id}");
++                } else {
++                    $this->liberarPago->aplicar($pago, $pedido);
++                }
++            }
++
++            return ['disputa' => $disputa, 'pedido' => $pedido];
++        });
++
++        // Ya confirmado todo: se avisa a las dos partes (el mediador no es parte, así que no se excluye a nadie).
++        $this->cambiarEstado->notificar(
++            $resultado['pedido'],
++            $estadoPedido,
++            $mediador,
++            $aFavorDelCliente
++                ? 'La disputa se resolvió a favor del cliente.'
++                : 'La disputa se resolvió a favor del prestador.',
++        );
++
++        return $resultado['disputa'];
++    }
++}
+diff --git a/app/Actions/Disputas/TomarDisputa.php b/app/Actions/Disputas/TomarDisputa.php
+new file mode 100644
+index 0000000..7a9fc80
+--- /dev/null
++++ b/app/Actions/Disputas/TomarDisputa.php
+@@ -0,0 +1,50 @@
++<?php
++
++namespace App\Actions\Disputas;
++
++use App\Models\Disputa;
++use App\Models\User;
++use App\Support\Auditoria;
++use Illuminate\Support\Facades\DB;
++
++/**
++ * Un mediador se asigna un caso pendiente ("tomarlo") para que nadie más lo resuelva a la vez.
++ * Quien llama debe haber comprobado ya la autorización (DisputaPolicy::mediar).
++ */
++class TomarDisputa
++{
++    /** @throws DisputaException si el caso ya está resuelto o lo tiene otro mediador */
++    public function ejecutar(User $mediador, int $disputaId): Disputa
++    {
++        return DB::transaction(function () use ($mediador, $disputaId) {
++            $disputa = Disputa::whereKey($disputaId)->lockForUpdate()->firstOrFail();
++
++            if (! $disputa->estaAbierta()) {
++                throw new DisputaException('Esta disputa ya fue resuelta.');
++            }
++
++            if (! $disputa->puedeSerGestionadaPor($mediador)) {
++                throw new DisputaException('Otro mediador ya tomó este caso.');
++            }
++
++            // Tomarla de nuevo (el mismo mediador) no cambia nada.
++            if ($disputa->mediador_id === $mediador->id && $disputa->estado === Disputa::EN_REVISION) {
++                return $disputa;
++            }
++
++            $antes = ['estado' => $disputa->estado, 'mediador_id' => $disputa->mediador_id];
++
++            $disputa->update([
++                'estado'      => Disputa::EN_REVISION,
++                'mediador_id' => $mediador->id,
++            ]);
++
++            Auditoria::registrar('disputa.tomada', 'disputa', $disputa->id, $antes, [
++                'estado'      => Disputa::EN_REVISION,
++                'mediador_id' => $mediador->id,
++            ]);
++
++            return $disputa;
++        });
++    }
++}
+diff --git a/app/Actions/Pagos/LiberarPago.php b/app/Actions/Pagos/LiberarPago.php
+index bb8b34e..7b5e3fe 100644
+--- a/app/Actions/Pagos/LiberarPago.php
++++ b/app/Actions/Pagos/LiberarPago.php
+@@ -36,6 +36,23 @@ public function ejecutar(User $actor, int $pagoId): Pago
+         return Pago::with('transacciones')->findOrFail($pagoId);
+     }
+ 
++    /**
++     * Reparto de un monto al liberarlo: comisión de la plataforma y neto para el prestador.
++     * Única fuente de esta regla (la usan la liberación y la ficha del mediador).
++     *
++     * @return array{comision: float, neto: float}
++     */
++    public static function desglose(float $monto): array
++    {
++        $pct      = max(0.0, min(100.0, (float) config('marketplace.comision_porcentaje')));
++        $comision = round($monto * $pct / 100, 2);
++
++        return [
++            'comision' => $comision,
++            'neto'     => round($monto - $comision, 2),
++        ];
++    }
++
+     /**
+      * Núcleo de la liberación: valida y escribe los movimientos del libro.
+      *
+@@ -67,10 +84,7 @@ public function aplicar(Pago $pago, Pedido $pedido): void
+             ]);
+         }
+ 
+-        $monto    = (float) $pago->monto;
+-        $pct      = max(0.0, min(100.0, (float) config('marketplace.comision_porcentaje')));
+-        $comision = round($monto * $pct / 100, 2);
+-        $neto     = round($monto - $comision, 2);
++        ['comision' => $comision, 'neto' => $neto] = self::desglose((float) $pago->monto);
+ 
+         Transaccione::create([
+             'pago_id'   => $pago->id,
+diff --git a/app/Http/Controllers/Api/DisputaApiController.php b/app/Http/Controllers/Api/DisputaApiController.php
+new file mode 100644
+index 0000000..4e6b88e
+--- /dev/null
++++ b/app/Http/Controllers/Api/DisputaApiController.php
+@@ -0,0 +1,34 @@
++<?php
++
++namespace App\Http\Controllers\Api;
++
++use App\Actions\Disputas\AbrirDisputa;
++use App\Actions\Pedidos\CambiarEstadoPedido;
++use App\Http\Controllers\Controller;
++use App\Http\Resources\DisputaResource;
++use App\Models\Pedido;
++use Illuminate\Http\JsonResponse;
++use Illuminate\Http\Request;
++
++/** Servicio 4b — Disputa del pedido (RF-38). El mediador resuelve desde el panel web. */
++class DisputaApiController extends Controller
++{
++    public function store(Request $request, Pedido $pedido, AbrirDisputa $abrir): JsonResponse
++    {
++        $usuario = $request->user();
++
++        // Quien no es parte del pedido recibe 404 (no se revela que existe).
++        abort_if(CambiarEstadoPedido::actoresDe($usuario, $pedido) === [], 404);
++
++        // Parte del pedido, pero sin derecho a reclamar (prestador, módulo apagado, estado, duplicado).
++        abort_unless($usuario->can('abrirDisputa', $pedido), 403);
++
++        $datos = $request->validate([
++            'motivo' => ['required', 'string', 'min:20', 'max:1500'],
++        ]);
++
++        $disputa = $abrir->ejecutar($usuario, $pedido, $datos['motivo']);
++
++        return (new DisputaResource($disputa))->response()->setStatusCode(201);
++    }
++}
+diff --git a/app/Http/Controllers/DashboardController.php b/app/Http/Controllers/DashboardController.php
+index 3d6a678..c8c1f80 100644
+--- a/app/Http/Controllers/DashboardController.php
++++ b/app/Http/Controllers/DashboardController.php
+@@ -20,6 +20,9 @@ class DashboardController extends Controller
+     private const MAX_CATALOGO = 100;
+     private const MAX_NOTIFICACIONES = 20;
+ 
++    /** Disputa del pedido (RF-38): solo lo que ven las dos partes; nada del mediador. */
++    private const DISPUTA = 'disputa:id,pedido_id,estado,motivo,resolucion_notas';
++
+     public function __invoke(Request $request): Response
+     {
+         $user = $request->user();
+@@ -55,7 +58,11 @@ public function __invoke(Request $request): Response
+                     'servicio',
+                     fn ($q) => $q->where('perfil_prestador_id', $perfil->id)
+                 )
+-                    ->with(['cliente:id,nombre', 'servicio.categoria:id,nombre'])
++                    ->with([
++                        'cliente:id,nombre',
++                        'servicio.categoria:id,nombre',
++                        self::DISPUTA,
++                    ])
+                     ->latest()
+                     ->limit(self::MAX_PEDIDOS)
+                     ->get();
+@@ -66,6 +73,7 @@ public function __invoke(Request $request): Response
+                         'servicio.perfilPrestador:id,user_id',
+                         'servicio.perfilPrestador.user:id,nombre',
+                         'resena',
++                        self::DISPUTA,
+                     ])
+                     ->latest()
+                     ->limit(self::MAX_PEDIDOS)
+diff --git a/app/Http/Controllers/Mediacion/DisputaController.php b/app/Http/Controllers/Mediacion/DisputaController.php
+new file mode 100644
+index 0000000..014a8d4
+--- /dev/null
++++ b/app/Http/Controllers/Mediacion/DisputaController.php
+@@ -0,0 +1,204 @@
++<?php
++
++namespace App\Http\Controllers\Mediacion;
++
++use App\Actions\Disputas\DisputaException;
++use App\Actions\Disputas\ResolverDisputa;
++use App\Actions\Disputas\TomarDisputa;
++use App\Http\Controllers\Controller;
++use App\Http\Resources\PagoResource;
++use App\Models\Disputa;
++use App\Models\Pago;
++use App\Actions\Pagos\LiberarPago;
++use Illuminate\Database\Eloquent\Builder;
++use Illuminate\Http\RedirectResponse;
++use Illuminate\Http\Request;
++use Illuminate\Support\Str;
++use Illuminate\Validation\Rule;
++use Illuminate\Validation\ValidationException;
++use Inertia\Inertia;
++use Inertia\Response;
++use Symfony\Component\HttpKernel\Exception\HttpExceptionInterface;
++
++/**
++ * RF-38 — Panel del mediador: cola de disputas, ficha con la evidencia de ambas partes y
++ * resolución. Las rutas ya exigen rol mediador o superadmin; DisputaPolicy::mediar además
++ * excluye a quien sea parte del pedido.
++ *
++ * A la vista solo viajan nombres: nunca correos, teléfonos ni la dirección del domicilio.
++ */
++class DisputaController extends Controller
++{
++    private const POR_PAGINA = 15;
++
++    private const RELACIONES = [
++        'pedido:id,cliente_id,servicio_id,estado,fecha_programada',
++        'pedido.cliente:id,nombre',
++        'pedido.servicio:id,titulo,perfil_prestador_id',
++        'pedido.servicio.perfilPrestador:id,user_id',
++        'pedido.servicio.perfilPrestador.user:id,nombre',
++        'mediador:id,nombre',
++    ];
++
++    public function index(Request $request): Response
++    {
++        $usuario = $request->user();
++        $vista   = $request->query('vista') === 'resueltas' ? 'resueltas' : 'pendientes';
++
++        // La cola nunca incluye casos de los que el propio mediador es parte.
++        $base = Disputa::query()->whereHas(
++            'pedido',
++            fn (Builder $pedido) => $pedido
++                ->where('cliente_id', '!=', $usuario->id)
++                ->whereDoesntHave(
++                    'servicio.perfilPrestador',
++                    fn (Builder $perfil) => $perfil->where('user_id', $usuario->id)
++                )
++        );
++
++        $pendientes = (clone $base)->whereIn('estado', Disputa::ABIERTAS)->count();
++
++        $consulta = (clone $base)->with(self::RELACIONES);
++
++        $consulta = $vista === 'pendientes'
++            ? $consulta->whereIn('estado', Disputa::ABIERTAS)->oldest()          // la más antigua primero
++            : $consulta->whereNotIn('estado', Disputa::ABIERTAS)->latest('updated_at');
++
++        $disputas = $consulta
++            ->paginate(self::POR_PAGINA)
++            ->withQueryString()
++            ->through(fn (Disputa $d) => $this->resumen($d, $usuario->id))
++            ->toArray();
++
++        return Inertia::render('Mediacion/Index', [
++            'disputas'   => $disputas,
++            'pendientes' => $pendientes,
++            'vista'      => $vista,
++        ]);
++    }
++
++    public function show(Request $request, Disputa $disputa): Response
++    {
++        $usuario = $request->user();
++
++        abort_unless($usuario->can('mediar', $disputa), 403);
++
++        $disputa->load([...self::RELACIONES, 'pedido.servicio.categoria:id,nombre']);
++
++        $pedido = $disputa->pedido;
++        $pago   = Pago::with('transacciones')->where('pedido_id', $pedido->id)->first();
++
++        return Inertia::render('Mediacion/Show', [
++            'disputa' => [
++                'id'               => $disputa->id,
++                'estado'           => $disputa->estado,
++                'motivo'           => $disputa->motivo,
++                'resolucion_notas' => $disputa->resolucion_notas,
++                'mediador'         => $disputa->mediador?->nombre,
++                'mia'              => $disputa->mediador_id === $usuario->id,
++                'abierta_en'       => $disputa->created_at?->toIso8601String(),
++                'resuelta_en'      => $disputa->estaAbierta() ? null : $disputa->updated_at?->toIso8601String(),
++            ],
++            'pedido' => [
++                'id'               => $pedido->id,
++                'estado'           => $pedido->estado,
++                'servicio'         => $pedido->servicio?->titulo,
++                'categoria'        => $pedido->servicio?->categoria?->nombre,
++                'cliente'          => $pedido->cliente?->nombre,
++                'prestador'        => $pedido->servicio?->perfilPrestador?->user?->nombre,
++                'fecha_programada' => $pedido->fecha_programada?->toIso8601String(),
++            ],
++            'pago'               => $pago ? $this->resumenPago($pago, $request) : null,
++            // Las fotos se piden aparte (evidencias.index) con la misma autorización de siempre.
++            'evidenciasVisibles' => $usuario->can('verEvidencias', $pedido),
++            'puedeGestionar'     => $disputa->estaAbierta() && $disputa->puedeSerGestionadaPor($usuario),
++        ]);
++    }
++
++    public function tomar(Request $request, Disputa $disputa, TomarDisputa $tomar): RedirectResponse
++    {
++        $usuario = $request->user();
++
++        abort_unless($usuario->can('mediar', $disputa), 403);
++
++        try {
++            $tomar->ejecutar($usuario, $disputa->id);
++        } catch (DisputaException $e) {
++            return redirect()->back()->with('error', $e->getMessage());
++        }
++
++        return redirect()->back()->with('success', 'Tomaste el caso. Revisa la evidencia de ambas partes y decide.');
++    }
++
++    public function resolver(Request $request, Disputa $disputa, ResolverDisputa $resolver): RedirectResponse
++    {
++        $usuario = $request->user();
++
++        abort_unless($usuario->can('mediar', $disputa), 403);
++
++        $datos = $request->validate([
++            'decision' => ['required', 'string', Rule::in([Disputa::FAVOR_CLIENTE, Disputa::FAVOR_PRESTADOR])],
++            'notas'    => ['required', 'string', 'min:10', 'max:1500'],
++        ], [
++            'decision.required' => 'Elige a favor de quién se resuelve la disputa.',
++            'decision.in'       => 'La decisión no es válida.',
++            'notas.required'    => 'Explica brevemente el motivo de tu decisión.',
++            'notas.min'         => 'Explica tu decisión con al menos :min caracteres: las dos partes la leerán.',
++            'notas.max'         => 'Las notas no pueden pasar de :max caracteres.',
++        ]);
++
++        try {
++            $resolver->ejecutar($usuario, $disputa->id, $datos['decision'], $datos['notas']);
++        } catch (DisputaException $e) {
++            return redirect()->back()->with('error', $e->getMessage());
++        } catch (ValidationException $e) {
++            // El pago no se pudo liberar o reembolsar: no se movió nada.
++            return redirect()->back()->with('error', $e->validator->errors()->first());
++        } catch (HttpExceptionInterface $e) {
++            // Solo los fallos de la pasarela (5xx) se muestran como aviso; el resto sigue su curso.
++            if ($e->getStatusCode() < 500) {
++                throw $e;
++            }
++
++            return redirect()->back()->with('error', $e->getMessage());
++        }
++
++        return redirect()->route('mediacion.disputas.index')
++            ->with('success', 'Disputa resuelta. Avisamos a las dos partes.');
++    }
++
++    /** Fila de la cola. Solo nombres y un extracto del motivo. */
++    private function resumen(Disputa $d, int $usuarioId): array
++    {
++        return [
++            'id'         => $d->id,
++            'pedido_id'  => $d->pedido_id,
++            'estado'     => $d->estado,
++            'servicio'   => $d->pedido?->servicio?->titulo,
++            'cliente'    => $d->pedido?->cliente?->nombre,
++            'prestador'  => $d->pedido?->servicio?->perfilPrestador?->user?->nombre,
++            'motivo'     => Str::limit($d->motivo, 140),
++            'mediador'   => $d->mediador?->nombre,
++            'mia'        => $d->mediador_id === $usuarioId,
++            'abierta_en' => $d->created_at?->toIso8601String(),
++        ];
++    }
++
++    /**
++     * Estado del escrow (misma regla que PagoResource) y reparto que haría una liberación.
++     * Sin referencias de la pasarela ni movimientos internos.
++     */
++    private function resumenPago(Pago $pago, Request $request): array
++    {
++        $escrow  = (new PagoResource($pago))->resolve($request);
++        $reparto = LiberarPago::desglose((float) $pago->monto);
++
++        return [
++            'estado'   => $escrow['estado'],
++            'monto'    => (float) $pago->monto,
++            'comision' => $reparto['comision'],
++            'neto'     => $reparto['neto'],
++            'metodo'   => $pago->metodo_pago,
++        ];
++    }
++}
+diff --git a/app/Http/Controllers/PedidoDisputaController.php b/app/Http/Controllers/PedidoDisputaController.php
+new file mode 100644
+index 0000000..0cb0f55
+--- /dev/null
++++ b/app/Http/Controllers/PedidoDisputaController.php
+@@ -0,0 +1,35 @@
++<?php
++
++namespace App\Http\Controllers;
++
++use App\Actions\Disputas\AbrirDisputa;
++use App\Models\Pedido;
++use Illuminate\Http\RedirectResponse;
++use Illuminate\Http\Request;
++
++/** RF-38 — El cliente abre una disputa desde el detalle de su pedido completado. */
++class PedidoDisputaController extends Controller
++{
++    public function store(Request $request, Pedido $pedido, AbrirDisputa $abrir): RedirectResponse
++    {
++        $usuario = $request->user();
++
++        // Módulo apagado, no es el cliente, el trabajo no está completado o ya hay disputa.
++        abort_unless($usuario->can('abrirDisputa', $pedido), 403);
++
++        $datos = $request->validate([
++            'motivo' => ['required', 'string', 'min:20', 'max:1500'],
++        ], [
++            'motivo.required' => 'Cuéntanos qué pasó con el trabajo.',
++            'motivo.min'      => 'Describe el problema con al menos :min caracteres para que el mediador pueda evaluarlo.',
++            'motivo.max'      => 'El motivo no puede pasar de :max caracteres.',
++        ]);
++
++        $abrir->ejecutar($usuario, $pedido, $datos['motivo']);
++
++        return redirect()->back()->with(
++            'success',
++            'Abrimos tu disputa. Un mediador la revisará y el pago sigue retenido hasta que decida.'
++        );
++    }
++}
+diff --git a/app/Http/Middleware/HandleInertiaRequests.php b/app/Http/Middleware/HandleInertiaRequests.php
+index 3cbaf7d..f0f4a76 100644
+--- a/app/Http/Middleware/HandleInertiaRequests.php
++++ b/app/Http/Middleware/HandleInertiaRequests.php
+@@ -49,11 +49,15 @@ public function share(Request $request): array
+                     'esCliente'   => $user->hasRole('cliente'),
+                     // Coincide con las rutas /admin (role:admin|superadmin|...).
+                     'esAdmin'     => $user->hasAnyRole(['admin', 'superadmin']),
++                    // Mediador o superadmin: ven la cola de disputas (/mediacion).
++                    'esMediador'  => $user->hasAnyRole(['mediador', 'superadmin']),
+                 ] : null,
+             ],
+ 
+             'marketplace' => [
+-                'horasConfirmacion' => (int) config('marketplace.horas_confirmacion_automatica'),
++                'horasConfirmacion'   => (int) config('marketplace.horas_confirmacion_automatica'),
++                // Sin esto el cliente solo puede confirmar el trabajo (no ve "Abrir disputa").
++                'disputasHabilitadas' => (bool) config('marketplace.disputas_habilitadas'),
+             ],
+ 
+             // Lo lee Components/Toast.vue (page.props.flash).
+diff --git a/app/Http/Resources/DisputaResource.php b/app/Http/Resources/DisputaResource.php
+new file mode 100644
+index 0000000..20ebdf0
+--- /dev/null
++++ b/app/Http/Resources/DisputaResource.php
+@@ -0,0 +1,22 @@
++<?php
++
++namespace App\Http\Resources;
++
++use Illuminate\Http\Request;
++use Illuminate\Http\Resources\Json\JsonResource;
++
++/** Disputa tal como la ve quien la abrió (API). Sin datos del mediador. */
++class DisputaResource extends JsonResource
++{
++    public function toArray(Request $request): array
++    {
++        return [
++            'id'               => $this->id,
++            'pedido_id'        => $this->pedido_id,
++            'estado'           => $this->estado,
++            'motivo'           => $this->motivo,
++            'resolucion_notas' => $this->resolucion_notas,
++            'created_at'       => $this->created_at?->toIso8601String(),
++        ];
++    }
++}
+diff --git a/app/Http/Resources/PedidoResource.php b/app/Http/Resources/PedidoResource.php
+index 2e551a6..d93d1aa 100644
+--- a/app/Http/Resources/PedidoResource.php
++++ b/app/Http/Resources/PedidoResource.php
+@@ -18,8 +18,13 @@ public function toArray(Request $request): array
+         return [
+             'id'     => $this->id,
+             'estado' => $this->estado,
+-            // Estados a los que ESTE usuario puede mover el pedido ahora mismo.
+-            'acciones_permitidas' => TransicionesPedido::permitidas($this->estado, $actores),
++            // Estados a los que ESTE usuario puede mover el pedido ahora mismo. Entrar o salir
++            // de "en_disputa" no es una acción manual: se hace con POST /pedidos/{id}/disputa
++            // (cliente) o desde el panel de mediación.
++            'acciones_permitidas' => array_values(array_filter(
++                TransicionesPedido::permitidas($this->estado, $actores),
++                fn (string $destino) => ! CambiarEstadoPedido::involucraDisputa($this->estado, $destino),
++            )),
+             'servicio' => $this->whenLoaded('servicio', fn () => [
+                 'id'          => $this->servicio->id,
+                 'titulo'      => $this->servicio->titulo,
+diff --git a/app/Models/Disputa.php b/app/Models/Disputa.php
+index e155181..385eb30 100644
+--- a/app/Models/Disputa.php
++++ b/app/Models/Disputa.php
+@@ -1,58 +1,89 @@
+ <?php
+ 
+-/**
+- * Created by Reliese Model.
+- */
+-
+ namespace App\Models;
+ 
+-use Carbon\Carbon;
+ use Illuminate\Database\Eloquent\Model;
++use Illuminate\Database\Eloquent\Relations\BelongsTo;
+ 
+ /**
+- * Class Disputa
+- * 
++ * Disputa de un pedido (RF-38): el cliente reporta un problema con el trabajo completado,
++ * un mediador revisa la evidencia de ambas partes y decide a quién se le entrega el pago.
++ *
+  * @property int $id
+  * @property int $pedido_id
+- * @property int $abierta_por
+- * @property int|null $mediador_id
++ * @property int $abierta_por      cliente que la abrió
++ * @property int|null $mediador_id mediador que tomó o resolvió el caso
+  * @property string $motivo
+  * @property string $estado
+  * @property string|null $resolucion_notas
+- * @property Carbon|null $created_at
+- * @property Carbon|null $updated_at
+- * 
+- * @property User|null $user
+- * @property Pedido $pedido
+- *
+- * @package App\Models
++ * @property \Carbon\Carbon|null $created_at
++ * @property \Carbon\Carbon|null $updated_at
++ * @property-read Pedido $pedido
++ * @property-read User|null $mediador
++ * @property-read User $abiertaPor
+  */
+ class Disputa extends Model
+ {
+-	protected $table = 'disputas';
+-
+-	protected $casts = [
+-		'pedido_id' => 'int',
+-		'abierta_por' => 'int',
+-		'mediador_id' => 'int'
+-	];
+-
+-	protected $fillable = [
+-		'pedido_id',
+-		'abierta_por',
+-		'mediador_id',
+-		'motivo',
+-		'estado',
+-		'resolucion_notas'
+-	];
+-
+-	public function user()
+-	{
+-		return $this->belongsTo(User::class, 'mediador_id');
+-	}
+-
+-	public function pedido()
+-	{
+-		return $this->belongsTo(Pedido::class);
+-	}
++    protected $table = 'disputas';
++
++    // Estados (coinciden con el enum de la migración).
++    public const ABIERTA                  = 'abierta';
++    public const EN_REVISION              = 'en_revision';
++    public const RESUELTA_FAVOR_CLIENTE   = 'resuelta_favor_cliente';
++    public const RESUELTA_FAVOR_PRESTADOR = 'resuelta_favor_prestador';
++    public const CANCELADA                = 'cancelada';
++
++    /** Estados en los que el caso sigue pendiente de decisión. */
++    public const ABIERTAS = [self::ABIERTA, self::EN_REVISION];
++
++    // Decisión que envía el mediador al resolver.
++    public const FAVOR_CLIENTE   = 'favor_cliente';
++    public const FAVOR_PRESTADOR = 'favor_prestador';
++
++    protected $casts = [
++        'pedido_id'   => 'int',
++        'abierta_por' => 'int',
++        'mediador_id' => 'int',
++    ];
++
++    protected $fillable = [
++        'pedido_id',
++        'abierta_por',
++        'mediador_id',
++        'motivo',
++        'estado',
++        'resolucion_notas',
++    ];
++
++    public function pedido(): BelongsTo
++    {
++        return $this->belongsTo(Pedido::class, 'pedido_id');
++    }
++
++    public function mediador(): BelongsTo
++    {
++        return $this->belongsTo(User::class, 'mediador_id');
++    }
++
++    public function abiertaPor(): BelongsTo
++    {
++        return $this->belongsTo(User::class, 'abierta_por');
++    }
++
++    /** ¿Sigue pendiente de decisión? */
++    public function estaAbierta(): bool
++    {
++        return in_array($this->estado, self::ABIERTAS, true);
++    }
++
++    /**
++     * Un caso tomado por un mediador solo lo gestiona él o un superadmin.
++     * (Que el mediador no sea parte del pedido lo decide DisputaPolicy.)
++     */
++    public function puedeSerGestionadaPor(User $user): bool
++    {
++        return $this->mediador_id === null
++            || $this->mediador_id === $user->id
++            || $user->hasRole('superadmin');
++    }
+ }
+diff --git a/app/Models/Pedido.php b/app/Models/Pedido.php
+index 36f769e..c2b19da 100644
+--- a/app/Models/Pedido.php
++++ b/app/Models/Pedido.php
+@@ -112,6 +112,12 @@ public function resena(): HasOne
+         return $this->hasOne(Resena::class);
+     }
+ 
++    /** Disputa del pedido (RF-38); como mucho una. */
++    public function disputa(): HasOne
++    {
++        return $this->hasOne(Disputa::class, 'pedido_id');
++    }
++
+     /** Evidencia fotográfica (antes / durante / después), en almacenamiento privado. */
+     public function evidencias(): HasMany
+     {
+diff --git a/app/Notifications/EstadoPedidoActualizado.php b/app/Notifications/EstadoPedidoActualizado.php
+index dd37eb3..ad8dad1 100644
+--- a/app/Notifications/EstadoPedidoActualizado.php
++++ b/app/Notifications/EstadoPedidoActualizado.php
+@@ -17,10 +17,14 @@ class EstadoPedidoActualizado extends Notification
+     public $pedido;
+     public $nuevoEstado;
+ 
+-    public function __construct($pedido, $nuevoEstado)
++    /** Frase breve y sin datos sensibles que acompaña al aviso (p. ej. el resultado de una disputa). */
++    public $detalle;
++
++    public function __construct($pedido, $nuevoEstado, $detalle = null)
+     {
+         $this->pedido = $pedido;
+         $this->nuevoEstado = $nuevoEstado;
++        $this->detalle = $detalle;
+     }
+ 
+     // 'database' guarda en la tabla 'notifications'; Web Push avisa al dispositivo
+@@ -52,6 +56,10 @@ public function toWebPush($notifiable): array
+             ? "Tienes una nueva solicitud de servicio (#{$this->pedido->id})."
+             : "Tu pedido #{$this->pedido->id} ahora está: {$this->nuevoEstado}.";
+ 
++        if (filled($this->detalle)) {
++            $cuerpo .= ' '.$this->detalle;
++        }
++
+         return [
+             'titulo' => 'Actualización de pedido',
+             'cuerpo' => $cuerpo,
+@@ -76,6 +84,10 @@ public function toCorreo($notifiable): array
+             ? "Tienes una nueva solicitud de servicio (pedido #{$id})."
+             : "Tu pedido #{$id} ahora está: {$estado}.";
+ 
++        if (filled($this->detalle)) {
++            $mensaje .= ' '.e($this->detalle);
++        }
++
+         $html = "<div style=\"font-family:Arial,sans-serif;max-width:480px;margin:auto;color:#1f2937\">"
+             ."<h2 style=\"color:#14305D\">OficiosYa</h2>"
+             ."<p>Hola, {$nombre}.</p>"
+@@ -96,7 +108,8 @@ public function toArray($notifiable): array
+     {
+         return [
+             'titulo'    => 'Actualización de Pedido',
+-            'mensaje'   => "Tu pedido #{$this->pedido->id} ha cambiado al estado: '{$this->nuevoEstado}'.",
++            'mensaje'   => "Tu pedido #{$this->pedido->id} ha cambiado al estado: '{$this->nuevoEstado}'."
++                .(filled($this->detalle) ? ' '.$this->detalle : ''),
+             'pedido_id' => $this->pedido->id,
+             'estado'    => $this->nuevoEstado,
+         ];
+diff --git a/app/Policies/DisputaPolicy.php b/app/Policies/DisputaPolicy.php
+new file mode 100644
+index 0000000..964f145
+--- /dev/null
++++ b/app/Policies/DisputaPolicy.php
+@@ -0,0 +1,31 @@
++<?php
++
++namespace App\Policies;
++
++use App\Models\Disputa;
++use App\Models\User;
++
++/** Quién puede mediar una disputa (RF-38 / RF-49: mínimo privilegio). */
++class DisputaPolicy
++{
++    /**
++     * Ver la ficha, tomar el caso o resolverlo: solo mediador o superadmin, y nunca
++     * quien sea parte del pedido (cliente o prestador). Así quien reclama o presta el
++     * servicio no puede decidir su propio caso aunque tenga también el rol de mediador.
++     */
++    public function mediar(User $user, Disputa $disputa): bool
++    {
++        if (! $user->hasAnyRole(['mediador', 'superadmin'])) {
++            return false;
++        }
++
++        $pedido = $disputa->pedido;
++
++        if ($pedido === null) {
++            return false;
++        }
++
++        return ! PedidoPolicy::esCliente($user, $pedido)
++            && ! PedidoPolicy::esPrestador($user, $pedido);
++    }
++}
+diff --git a/app/Policies/PedidoPolicy.php b/app/Policies/PedidoPolicy.php
+index 578952d..3a04c6e 100644
+--- a/app/Policies/PedidoPolicy.php
++++ b/app/Policies/PedidoPolicy.php
+@@ -2,10 +2,11 @@
+ 
+ namespace App\Policies;
+ 
++use App\Models\Disputa;
+ use App\Models\Pedido;
+ use App\Models\User;
+ 
+-/** Quién ve y quién sube la evidencia fotográfica de un pedido. */
++/** Quién ve y quién sube la evidencia fotográfica de un pedido, y quién abre una disputa. */
+ class PedidoPolicy
+ {
+     /** Estados en los que cada parte puede aportar evidencia. */
+@@ -40,6 +41,18 @@ public function verEvidencias(User $user, Pedido $pedido): bool
+             && $user->hasAnyRole(['mediador', 'superadmin']);
+     }
+ 
++    /**
++     * Solo el cliente del pedido, con el trabajo completado, una única vez y con el módulo
++     * encendido (MARKETPLACE_DISPUTAS). El resto de los casos se rechaza con 403.
++     */
++    public function abrirDisputa(User $user, Pedido $pedido): bool
++    {
++        return (bool) config('marketplace.disputas_habilitadas')
++            && self::esCliente($user, $pedido)
++            && $pedido->estado === Pedido::COMPLETADO
++            && ! Disputa::where('pedido_id', $pedido->id)->exists();
++    }
++
+     public function subirEvidencia(User $user, Pedido $pedido): bool
+     {
+         if (self::esPrestador($user, $pedido) && in_array($pedido->estado, self::SUBE_PRESTADOR, true)) {
+diff --git a/app/Services/MercadoPagoService.php b/app/Services/MercadoPagoService.php
+index 32e9813..258c7a0 100644
+--- a/app/Services/MercadoPagoService.php
++++ b/app/Services/MercadoPagoService.php
+@@ -79,6 +79,40 @@ public function obtenerPago(string $paymentId): ?array
+         return null;
+     }
+ 
++    /**
++     * Devuelve el pago completo al cliente (POST /v1/payments/{id}/refunds).
++     *
++     * La clave de idempotencia debe ser estable para esta devolución: si hay que reintentar
++     * después de un fallo, Mercado Pago reconoce la misma operación y no devuelve dos veces.
++     *
++     * @return bool true si la pasarela aceptó la devolución
++     */
++    public function reembolsar(string $paymentId, string $claveIdempotencia): bool
++    {
++        // Solo dígitos: el id va dentro de la URL y no debe poder alterarla.
++        if (! ctype_digit($paymentId)) {
++            return false;
++        }
++
++        try {
++            // Cuerpo "{}" = devolución total.
++            $respuesta = $this->http()
++                ->withHeaders(['X-Idempotency-Key' => $claveIdempotencia])
++                ->withBody('{}', 'application/json')
++                ->post(self::BASE.'/v1/payments/'.$paymentId.'/refunds');
++
++            if ($respuesta->successful()) {
++                return true;
++            }
++
++            Log::warning('Mercado Pago rechazó la devolución', ['codigo' => $respuesta->status()]);
++        } catch (Throwable $e) {
++            Log::warning('Mercado Pago no respondió a la devolución', ['tipo' => class_basename($e)]);
++        }
++
++        return false;
++    }
++
+     /**
+      * Valida la cabecera x-signature de una notificación (HMAC-SHA256 con el secreto de la
+      * aplicación). Sin MP_WEBHOOK_SECRET no se verifica, lo cual es seguro porque de todos
+diff --git a/resources/js/Pages/Mediacion/Index.vue b/resources/js/Pages/Mediacion/Index.vue
+new file mode 100644
+index 0000000..ce5f7d1
+--- /dev/null
++++ b/resources/js/Pages/Mediacion/Index.vue
+@@ -0,0 +1,150 @@
++<script setup>
++import { computed } from 'vue'
++import { Head, Link, router } from '@inertiajs/vue3'
++import AuthenticatedLayout from '@/Layouts/AuthenticatedLayout.vue'
++
++/**
++ * Cola de mediación (RF-38). Solo nombres: ni correos ni direcciones llegan a esta vista.
++ * `disputas` es el paginado de Laravel (data, prev_page_url, next_page_url…).
++ */
++const props = defineProps({
++  disputas: { type: Object, required: true },
++  pendientes: { type: Number, default: 0 },
++  vista: { type: String, default: 'pendientes' },
++})
++
++const filtros = computed(() => [
++  { valor: 'pendientes', etiqueta: `Pendientes (${props.pendientes})` },
++  { valor: 'resueltas', etiqueta: 'Resueltas' },
++])
++
++const filtrar = (vista) => {
++  router.get(route('mediacion.disputas.index'), { vista }, { preserveState: true, replace: true })
++}
++
++const irA = (url) => {
++  if (url) router.get(url, {}, { preserveState: true, preserveScroll: false })
++}
++
++const ETIQUETAS = {
++  abierta: 'Abierta',
++  en_revision: 'En revisión',
++  resuelta_favor_cliente: 'A favor del cliente',
++  resuelta_favor_prestador: 'A favor del prestador',
++  cancelada: 'Cancelada',
++}
++
++const etiqueta = (estado) => ETIQUETAS[estado] || estado
++
++const claseEstado = (estado) => {
++  switch (estado) {
++    case 'abierta':
++      return 'bg-orange-50 text-orange-800 border-orange-200'
++    case 'en_revision':
++      return 'bg-blue-50 text-blue-800 border-blue-200'
++    case 'cancelada':
++      return 'bg-slate-100 text-slate-600 border-slate-200'
++    default:
++      return 'bg-emerald-50 text-emerald-800 border-emerald-200'
++  }
++}
++
++const fecha = (iso) =>
++  iso ? new Date(iso).toLocaleDateString('es-MX', { day: '2-digit', month: 'short', year: 'numeric' }) : ''
++</script>
++
++<template>
++  <Head title="Disputas" />
++
++  <AuthenticatedLayout>
++    <div class="py-10 max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 space-y-6">
++      <!-- Encabezado -->
++      <section class="rounded-3xl bg-gradient-to-br from-principal via-principal to-[#1d4a8a] p-6 sm:p-8 shadow-xl shadow-principal/20">
++        <h1 class="text-2xl sm:text-3xl font-extrabold text-white tracking-tight">Mediación de disputas</h1>
++        <p class="text-sm text-niebla/80 mt-1">
++          Revisa la evidencia de ambas partes y decide si el pago se libera al prestador o se devuelve al cliente.
++        </p>
++      </section>
++
++      <!-- Filtros -->
++      <div class="flex flex-wrap gap-2" role="tablist" aria-label="Filtrar disputas">
++        <button
++          v-for="f in filtros"
++          :key="f.valor"
++          type="button"
++          role="tab"
++          :aria-selected="vista === f.valor"
++          @click="filtrar(f.valor)"
++          class="px-5 py-2 rounded-xl text-sm font-bold border-2 transition-all duration-200 active:scale-95"
++          :class="vista === f.valor
++            ? 'bg-principal text-white border-principal shadow-md'
++            : 'bg-white text-principal border-slate-200 hover:border-principal/40'"
++        >
++          {{ f.etiqueta }}
++        </button>
++      </div>
++
++      <!-- Vacío -->
++      <div v-if="!disputas.data.length" class="bg-white rounded-3xl border-2 border-slate-200/90 py-14 text-center px-4">
++        <p class="text-sm font-bold text-principal">
++          {{ vista === 'pendientes' ? 'No hay disputas pendientes' : 'Todavía no hay disputas resueltas' }}
++        </p>
++        <p class="text-xs text-gris-medio mt-1">Cuando un cliente reporte un problema, aparecerá aquí.</p>
++      </div>
++
++      <!-- Lista -->
++      <ul v-else class="space-y-3">
++        <li v-for="d in disputas.data" :key="d.id">
++          <Link
++            :href="route('mediacion.disputas.show', d.id)"
++            class="block bg-white rounded-2xl border-2 border-slate-200/90 p-5 shadow-sm hover:border-principal/40 hover:shadow-md transition-all"
++          >
++            <div class="flex flex-wrap items-start justify-between gap-3">
++              <div class="min-w-0">
++                <p class="text-[11px] font-bold uppercase tracking-wider text-gris-medio">
++                  Pedido #{{ d.pedido_id }} · {{ fecha(d.abierta_en) }}
++                </p>
++                <p class="text-base font-extrabold text-principal truncate">{{ d.servicio || 'Servicio' }}</p>
++                <p class="text-sm text-grafito">
++                  {{ d.cliente || 'Cliente' }} <span class="text-gris-medio">frente a</span> {{ d.prestador || 'Prestador' }}
++                </p>
++              </div>
++
++              <div class="flex flex-col items-end gap-1.5 shrink-0">
++                <span class="px-3 py-1 rounded-full border text-[11px] font-bold" :class="claseEstado(d.estado)">
++                  {{ etiqueta(d.estado) }}
++                </span>
++                <span v-if="d.mediador" class="text-[11px] text-gris-medio">
++                  {{ d.mia ? 'Lo tienes tú' : 'Lo tiene ' + d.mediador }}
++                </span>
++              </div>
++            </div>
++
++            <p class="mt-3 text-sm text-grafito italic">“{{ d.motivo }}”</p>
++          </Link>
++        </li>
++      </ul>
++
++      <!-- Paginación -->
++      <nav v-if="disputas.last_page > 1" class="flex items-center justify-between" aria-label="Paginación">
++        <button
++          type="button"
++          :disabled="!disputas.prev_page_url"
++          @click="irA(disputas.prev_page_url)"
++          class="px-4 py-2 rounded-xl text-sm font-bold border-2 border-slate-200 bg-white text-principal disabled:opacity-40"
++        >
++          Anterior
++        </button>
++        <span class="text-xs text-gris-medio">Página {{ disputas.current_page }} de {{ disputas.last_page }}</span>
++        <button
++          type="button"
++          :disabled="!disputas.next_page_url"
++          @click="irA(disputas.next_page_url)"
++          class="px-4 py-2 rounded-xl text-sm font-bold border-2 border-slate-200 bg-white text-principal disabled:opacity-40"
++        >
++          Siguiente
++        </button>
++      </nav>
++    </div>
++  </AuthenticatedLayout>
++</template>
+diff --git a/resources/js/Pages/Mediacion/Show.vue b/resources/js/Pages/Mediacion/Show.vue
+new file mode 100644
+index 0000000..398e7a6
+--- /dev/null
++++ b/resources/js/Pages/Mediacion/Show.vue
+@@ -0,0 +1,254 @@
++<script setup>
++import { computed, ref } from 'vue'
++import { Head, Link, router, useForm } from '@inertiajs/vue3'
++import AuthenticatedLayout from '@/Layouts/AuthenticatedLayout.vue'
++import EvidenciaDisputa from '@/Components/EvidenciaDisputa.vue'
++
++/**
++ * Ficha de una disputa (RF-38): motivo, pago retenido, evidencia de ambas partes y resolución.
++ * Solo nombres: ni correos ni la dirección del domicilio llegan a esta vista.
++ */
++const props = defineProps({
++  disputa: { type: Object, required: true },
++  pedido: { type: Object, required: true },
++  pago: { type: Object, default: null },
++  evidenciasVisibles: { type: Boolean, default: false },
++  puedeGestionar: { type: Boolean, default: false },
++})
++
++const MIN_NOTAS = 10
++const MAX_NOTAS = 1500
++
++const form = useForm({ decision: '', notas: '' })
++const confirmando = ref(false)
++const tomando = ref(false)
++
++const mxn = (valor) =>
++  new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN' }).format(Number(valor) || 0)
++
++const fecha = (iso) =>
++  iso
++    ? new Date(iso).toLocaleString('es-MX', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })
++    : ''
++
++const ETIQUETAS = {
++  abierta: 'Abierta',
++  en_revision: 'En revisión',
++  resuelta_favor_cliente: 'Resuelta a favor del cliente',
++  resuelta_favor_prestador: 'Resuelta a favor del prestador',
++  cancelada: 'Cancelada',
++}
++
++const etiquetaEstado = computed(() => ETIQUETAS[props.disputa.estado] || props.disputa.estado)
++const abierta = computed(() => ['abierta', 'en_revision'].includes(props.disputa.estado))
++const sinTomar = computed(() => props.disputa.estado === 'abierta')
++
++const pagoRetenido = computed(() => props.pago?.estado === 'retenido')
++
++/** Consecuencia de cada decisión, dicha en claro antes de confirmar. */
++const consecuencia = computed(() => {
++  const aFavor = form.decision
++  if (!aFavor) return ''
++
++  if (!pagoRetenido.value) {
++    return aFavor === 'favor_cliente'
++      ? 'El pedido se cancelará. No hay un pago retenido, así que no se moverá dinero.'
++      : 'El pedido quedará confirmado. No hay un pago retenido, así que no se moverá dinero.'
++  }
++
++  return aFavor === 'favor_cliente'
++    ? `El pedido se cancelará y se devolverán ${mxn(props.pago.monto)} al cliente, sin comisión.`
++    : `El pedido quedará confirmado, se liberarán ${mxn(props.pago.neto)} al prestador y ${mxn(props.pago.comision)} quedarán como comisión.`
++})
++
++const notasValidas = computed(() => form.notas.trim().length >= MIN_NOTAS)
++const puedeRevisar = computed(() => !!form.decision && notasValidas.value)
++
++const sinConexion = () => {
++  if (!navigator.onLine) {
++    form.setError('notas', 'Necesitas conexión para resolver una disputa.')
++    return true
++  }
++  return false
++}
++
++const tomar = () => {
++  if (tomando.value) return
++  tomando.value = true
++  router.post(route('mediacion.disputas.tomar', props.disputa.id), {}, {
++    preserveScroll: true,
++    onFinish: () => (tomando.value = false),
++  })
++}
++
++const resolver = () => {
++  if (sinConexion()) return
++
++  form.post(route('mediacion.disputas.resolver', props.disputa.id), {
++    preserveScroll: true,
++    onFinish: () => (confirmando.value = false),
++  })
++}
++</script>
++
++<template>
++  <Head :title="`Disputa · Pedido #${pedido.id}`" />
++
++  <AuthenticatedLayout>
++    <div class="py-10 max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 space-y-6">
++      <Link :href="route('mediacion.disputas.index')" class="inline-flex items-center gap-1 text-sm font-bold text-principal hover:underline">
++        ← Volver a la cola
++      </Link>
++
++      <!-- Resumen -->
++      <section class="bg-white rounded-3xl border-2 border-slate-200/90 p-6 shadow-sm space-y-3">
++        <div class="flex flex-wrap items-start justify-between gap-3">
++          <div class="min-w-0">
++            <p class="text-[11px] font-bold uppercase tracking-wider text-gris-medio">Pedido #{{ pedido.id }} · {{ pedido.categoria || 'Servicio' }}</p>
++            <h1 class="text-xl sm:text-2xl font-extrabold text-principal">{{ pedido.servicio || 'Servicio' }}</h1>
++            <p class="text-sm text-grafito mt-1">
++              <span class="font-bold">{{ pedido.cliente || 'Cliente' }}</span>
++              <span class="text-gris-medio"> (cliente) frente a </span>
++              <span class="font-bold">{{ pedido.prestador || 'Prestador' }}</span>
++              <span class="text-gris-medio"> (prestador)</span>
++            </p>
++          </div>
++          <span class="px-3 py-1 rounded-full bg-niebla text-principal border border-principal/15 text-xs font-bold">{{ etiquetaEstado }}</span>
++        </div>
++
++        <p class="text-xs text-gris-medio">
++          Abierta el {{ fecha(disputa.abierta_en) }}
++          <template v-if="disputa.mediador"> · {{ disputa.mia ? 'La tienes tú' : 'La tiene ' + disputa.mediador }}</template>
++        </p>
++
++        <div class="rounded-2xl bg-orange-50 border border-orange-200 p-4">
++          <p class="text-[11px] font-bold uppercase tracking-wider text-orange-800">Motivo del cliente</p>
++          <p class="text-sm text-orange-950 mt-1 whitespace-pre-line">{{ disputa.motivo }}</p>
++        </div>
++      </section>
++
++      <!-- Pago -->
++      <section class="bg-white rounded-3xl border-2 border-slate-200/90 p-6 shadow-sm space-y-2">
++        <h2 class="text-sm font-extrabold text-principal uppercase tracking-wider">Pago</h2>
++        <p v-if="!pago" class="text-sm text-gris-medio">Este pedido no tiene un pago cobrado.</p>
++        <dl v-else class="grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm">
++          <div><dt class="text-xs text-gris-medio">Estado</dt><dd class="font-bold text-grafito capitalize">{{ pago.estado }}</dd></div>
++          <div><dt class="text-xs text-gris-medio">Monto</dt><dd class="font-bold text-grafito">{{ mxn(pago.monto) }}</dd></div>
++          <div><dt class="text-xs text-gris-medio">Si se libera: prestador</dt><dd class="font-bold text-grafito">{{ mxn(pago.neto) }}</dd></div>
++          <div><dt class="text-xs text-gris-medio">Si se libera: comisión</dt><dd class="font-bold text-grafito">{{ mxn(pago.comision) }}</dd></div>
++        </dl>
++      </section>
++
++      <!-- Evidencia -->
++      <section class="space-y-3">
++        <h2 class="text-sm font-extrabold text-principal uppercase tracking-wider">Evidencia de ambas partes</h2>
++        <EvidenciaDisputa
++          v-if="evidenciasVisibles"
++          :pedido-id="pedido.id"
++          :cliente="pedido.cliente || 'Cliente'"
++          :prestador="pedido.prestador || 'Prestador'"
++        />
++        <p v-else class="text-sm text-gris-medio bg-white rounded-2xl border border-slate-200 p-4">
++          Con el caso cerrado, las fotos privadas ya no están disponibles para mediación.
++        </p>
++      </section>
++
++      <!-- Decisión tomada -->
++      <section v-if="!abierta" class="bg-white rounded-3xl border-2 border-slate-200/90 p-6 shadow-sm space-y-2">
++        <h2 class="text-sm font-extrabold text-principal uppercase tracking-wider">Decisión</h2>
++        <p class="text-sm font-bold text-grafito">{{ etiquetaEstado }} · {{ fecha(disputa.resuelta_en) }}</p>
++        <p v-if="disputa.resolucion_notas" class="text-sm text-grafito italic">“{{ disputa.resolucion_notas }}”</p>
++      </section>
++
++      <!-- Resolver -->
++      <section v-else-if="puedeGestionar" class="bg-white rounded-3xl border-2 border-principal/20 p-6 shadow-sm space-y-4">
++        <div class="flex flex-wrap items-center justify-between gap-3">
++          <h2 class="text-sm font-extrabold text-principal uppercase tracking-wider">Tu decisión</h2>
++          <button
++            v-if="sinTomar"
++            type="button"
++            :disabled="tomando"
++            @click="tomar"
++            class="px-4 py-2 rounded-xl text-sm font-bold bg-niebla text-principal border border-principal/20 hover:bg-principal/10 disabled:opacity-50"
++          >
++            Tomar el caso
++          </button>
++        </div>
++
++        <fieldset class="space-y-2">
++          <legend class="sr-only">Resolver a favor de</legend>
++          <label class="flex items-start gap-3 rounded-2xl border-2 p-4 cursor-pointer"
++            :class="form.decision === 'favor_prestador' ? 'border-principal bg-niebla/50' : 'border-slate-200'">
++            <input v-model="form.decision" type="radio" value="favor_prestador" class="mt-1" :disabled="confirmando" />
++            <span>
++              <span class="block text-sm font-extrabold text-principal">A favor del prestador</span>
++              <span class="block text-xs text-gris-medio">El trabajo se da por bueno: se confirma el pedido y se libera el pago.</span>
++            </span>
++          </label>
++          <label class="flex items-start gap-3 rounded-2xl border-2 p-4 cursor-pointer"
++            :class="form.decision === 'favor_cliente' ? 'border-principal bg-niebla/50' : 'border-slate-200'">
++            <input v-model="form.decision" type="radio" value="favor_cliente" class="mt-1" :disabled="confirmando" />
++            <span>
++              <span class="block text-sm font-extrabold text-principal">A favor del cliente</span>
++              <span class="block text-xs text-gris-medio">Se cancela el pedido y se devuelve el pago completo, sin comisión.</span>
++            </span>
++          </label>
++          <p v-if="form.errors.decision" class="text-xs font-semibold text-red-600" role="alert">{{ form.errors.decision }}</p>
++        </fieldset>
++
++        <div>
++          <label for="notas-disputa" class="block text-sm font-bold text-principal mb-1">Explica tu decisión</label>
++          <textarea
++            id="notas-disputa"
++            v-model="form.notas"
++            rows="4"
++            :maxlength="MAX_NOTAS"
++            :disabled="confirmando"
++            class="w-full rounded-2xl border-2 border-slate-200 focus:border-principal focus:ring-principal text-sm"
++            placeholder="Las dos partes leerán esta explicación."
++          ></textarea>
++          <div class="flex items-center justify-between mt-1">
++            <p v-if="form.errors.notas" class="text-xs font-semibold text-red-600" role="alert">{{ form.errors.notas }}</p>
++            <span v-else class="text-[11px] text-gris-medio">Mínimo {{ MIN_NOTAS }} caracteres</span>
++            <span class="text-[11px] text-gris-medio">{{ form.notas.trim().length }}/{{ MAX_NOTAS }}</span>
++          </div>
++        </div>
++
++        <!-- Paso de confirmación: dice qué pasará con el dinero antes de ejecutarlo -->
++        <div v-if="confirmando" class="rounded-2xl bg-orange-50 border border-orange-200 p-4 space-y-3" role="alert">
++          <p class="text-sm font-bold text-orange-950">{{ consecuencia }}</p>
++          <p class="text-xs text-orange-900">Esta decisión no se puede deshacer.</p>
++          <div class="flex flex-wrap gap-2">
++            <button
++              type="button"
++              :disabled="form.processing"
++              @click="resolver"
++              class="px-5 py-2.5 rounded-xl text-sm font-bold bg-principal text-white hover:opacity-90 disabled:opacity-50"
++            >
++              {{ form.processing ? 'Resolviendo…' : 'Confirmar y resolver' }}
++            </button>
++            <button type="button" :disabled="form.processing" @click="confirmando = false" class="px-5 py-2.5 rounded-xl text-sm font-bold border-2 border-slate-200 text-principal">
++              Volver
++            </button>
++          </div>
++        </div>
++
++        <button
++          v-else
++          type="button"
++          :disabled="!puedeRevisar"
++          @click="confirmando = true"
++          class="px-5 py-2.5 rounded-xl text-sm font-bold bg-principal text-white hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
++        >
++          Revisar decisión
++        </button>
++      </section>
++
++      <section v-else class="bg-white rounded-3xl border-2 border-slate-200/90 p-6 shadow-sm">
++        <p class="text-sm text-grafito">
++          Este caso lo tiene {{ disputa.mediador || 'otro mediador' }}. Solo esa persona o un superadmin pueden resolverlo.
++        </p>
++      </section>
++    </div>
++  </AuthenticatedLayout>
++</template>

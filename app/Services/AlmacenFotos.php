@@ -3,7 +3,9 @@
 namespace App\Services;
 
 use App\Support\Imagenes\ProcesadorImagen;
+use Illuminate\Contracts\Encryption\DecryptException;
 use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
@@ -75,6 +77,63 @@ class AlmacenFotos
         }
 
         return ['ruta' => $ruta, 'hash_sha256' => $imagen->hash];
+    }
+
+    /**
+     * Documentos de identidad: se re-codifican (sin EXIF/GPS) y se guardan CIFRADOS con la
+     * clave de la aplicación (AES-256 vía Crypt). Aunque alguien lea el bucket, solo ve bytes
+     * ilegibles. No hay miniatura ni URL: solo se leen con leerCifrado() tras autorizar.
+     *
+     * @return array{ruta: string, hash_sha256: string}
+     *
+     * @throws ValidationException con el error en el campo "foto"
+     */
+    public function guardarCifrado(UploadedFile $archivo, string $disco, string $carpeta, int $ladoMax): array
+    {
+        try {
+            $imagen = $this->procesador->procesar($archivo, $ladoMax, 64);
+        } catch (InvalidArgumentException $e) {
+            throw ValidationException::withMessages(['foto' => $e->getMessage()]);
+        }
+
+        $ruta = trim($carpeta, '/').'/'.Str::lower((string) Str::ulid()).'.enc';
+
+        try {
+            Storage::disk($disco)->put($ruta, Crypt::encryptString($imagen->principal));
+        } catch (Throwable $e) {
+            report($e);
+
+            throw ValidationException::withMessages([
+                'foto' => 'No pudimos guardar el documento. Intenta de nuevo en un momento.',
+            ]);
+        }
+
+        return ['ruta' => $ruta, 'hash_sha256' => $imagen->hash];
+    }
+
+    /**
+     * Devuelve los bytes (WebP) de un documento cifrado y verifica su integridad.
+     * Lanza RuntimeException si falta el archivo, no se puede descifrar o el hash no coincide.
+     */
+    public function leerCifrado(string $disco, string $ruta, string $hashEsperado): string
+    {
+        $cifrado = Storage::disk($disco)->get($ruta);
+
+        if (! is_string($cifrado) || $cifrado === '') {
+            throw new \RuntimeException('El documento no existe en el almacenamiento.');
+        }
+
+        try {
+            $bytes = Crypt::decryptString($cifrado);
+        } catch (DecryptException) {
+            throw new \RuntimeException('No se pudo descifrar el documento.');
+        }
+
+        if (! hash_equals($hashEsperado, hash('sha256', $bytes))) {
+            throw new \RuntimeException('El documento no coincide con su huella de integridad.');
+        }
+
+        return $bytes;
     }
 
     /** Borra la imagen y su miniatura. Un fallo del almacenamiento se reporta pero no rompe la petición. */

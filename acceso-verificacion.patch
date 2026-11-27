@@ -1,0 +1,81 @@
+diff --git a/resources/js/Layouts/AuthenticatedLayout.vue b/resources/js/Layouts/AuthenticatedLayout.vue
+index 31129dc..c74482d 100644
+--- a/resources/js/Layouts/AuthenticatedLayout.vue
++++ b/resources/js/Layouts/AuthenticatedLayout.vue
+@@ -82,6 +82,12 @@ const secciones = computed(() => {
+       activo: !!route().current('prestador.perfil.edit'),
+       icono: 'prestador',
+     })
++    principal.push({
++      nombre: 'Verificación de identidad',
++      href: route('prestador.verificacion.show'),
++      activo: !!route().current('prestador.verificacion.*'),
++      icono: 'prestador',
++    })
+   }
+ 
+   return [
+@@ -179,6 +185,14 @@ const cajaEscritorioSalir =
+                 >
+                   Perfil Prestador
+                 </Link>
++
++                <Link
++                  v-if="esPrestador"
++                  :href="route('prestador.verificacion.show')"
++                  :class="claseEnlace(route().current('prestador.verificacion.*'))"
++                >
++                  Verificación
++                </Link>
+               </div>
+             </div>
+ 
+@@ -226,6 +240,15 @@ const cajaEscritorioSalir =
+                         Perfil prestador
+                       </Link>
+ 
++                      <Link v-if="esPrestador" :href="route('prestador.verificacion.show')" :class="itemEscritorio">
++                        <span :class="cajaEscritorio">
++                          <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
++                            <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z" />
++                          </svg>
++                        </span>
++                        Verificación de identidad
++                      </Link>
++
+                       <Link :href="route('profile.edit')" :class="itemEscritorio">
+                         <span :class="cajaEscritorio">
+                           <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
+diff --git a/resources/js/Pages/Dashboard.vue b/resources/js/Pages/Dashboard.vue
+index d41ffc4..0f609bc 100644
+--- a/resources/js/Pages/Dashboard.vue
++++ b/resources/js/Pages/Dashboard.vue
+@@ -1,6 +1,6 @@
+ <script setup>
+ import { ref, computed, onMounted, watch } from 'vue'
+-import { Head, router, useForm, usePage } from '@inertiajs/vue3'
++import { Head, Link, router, useForm, usePage } from '@inertiajs/vue3'
+ import AuthenticatedLayout from '@/Layouts/AuthenticatedLayout.vue'
+ import BuscadorUbicacion from '@/Components/BuscadorUbicacion.vue'
+ import EvidenciaPedido from '@/Components/EvidenciaPedido.vue'
+@@ -431,14 +431,17 @@ const marcarNotificacionesLeidas = () => {
+                 Hola, <span class="text-acento">{{ nombreUsuario }}</span>
+               </h1>
+ 
+-              <span
++              <Link
+                 v-if="perfil?.estado_verificacion"
+-                class="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full text-[11px] font-bold uppercase tracking-wider border"
++                :href="route('prestador.verificacion.show')"
++                class="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full text-[11px] font-bold uppercase tracking-wider border hover:brightness-110 transition"
+                 :class="estiloVerificacion.badge"
++                title="Ver o completar mi verificación de identidad"
+               >
+                 <span class="w-1.5 h-1.5 rounded-full" :class="estiloVerificacion.punto"></span>
+                 Perfil {{ perfil.estado_verificacion }}
+-              </span>
++                <template v-if="perfil.estado_verificacion !== 'verificado'"> · completar →</template>
++              </Link>
+             </div>
+ 
+             <div class="flex gap-3">

@@ -1,0 +1,618 @@
+diff --git a/app/Http/Controllers/MensajeController.php b/app/Http/Controllers/MensajeController.php
+index 106c963..0dc87db 100644
+--- a/app/Http/Controllers/MensajeController.php
++++ b/app/Http/Controllers/MensajeController.php
+@@ -6,20 +6,22 @@
+ use App\Models\Pedido;
+ use App\Models\User;
+ use App\Notifications\NuevoMensajeChat;
++use App\Services\WebPushService;
+ use App\Support\Chat\AccesoChat;
+ use App\Support\Idempotencia;
+ use Illuminate\Database\Eloquent\Builder;
+ use Illuminate\Http\JsonResponse;
+ use Illuminate\Http\Request;
+-use Illuminate\Support\Facades\Cache;
+ use Throwable;
+ 
+ /**
+  * Chat del pedido (RF-22): solo cliente y prestador, solo texto.
+  *
+- * Tiempo real por polling: el cliente web pide "mensajes después del id N" cada pocos
+- * segundos mientras la conversación está abierta. Enviar acepta Idempotency-Key, así que la
+- * cola offline puede reintentar sin duplicar el mensaje.
++ * Tiempo real por Web Push, no por consultas constantes: cada mensaje nuevo dispara un push a
++ * la otra persona y el Service Worker avisa a la app abierta, que entonces pide "mensajes
++ * después del id N". Esta ruta de lectura solo se consulta en ese momento, al abrir el chat y,
++ * como red de seguridad, con poca frecuencia (más espaciada si no hay push disponible).
++ * Enviar acepta Idempotency-Key, así que la cola offline puede reintentar sin duplicar.
+  *
+  * A quien no es parte del pedido se le responde 404 (no se revela que existe).
+  */
+@@ -28,15 +30,9 @@ class MensajeController extends Controller
+     /** Máximo de mensajes por respuesta. */
+     private const PAGINA = 100;
+ 
+-    /** Cuánto cuenta como "tiene el chat abierto" desde su última consulta. */
+-    private const SEGUNDOS_ACTIVO = 15;
+-
+-    /** Mínimo entre dos avisos push de una misma conversación al mismo destinatario. */
+-    private const MINUTOS_ENTRE_AVISOS = 5;
+-
+     /**
+      * Sin parámetros: los últimos mensajes, en orden cronológico (primera carga).
+-     * Con ?despues=ID: solo los posteriores a ese id (polling).
++     * Con ?despues=ID: solo los posteriores a ese id (lo que el cliente pide al recibir el push).
+      */
+     public function index(Request $request, Pedido $pedido): JsonResponse
+     {
+@@ -56,9 +52,6 @@ public function index(Request $request, Pedido $pedido): JsonResponse
+             $mensajes = $consulta->orderByDesc('id')->limit(self::PAGINA)->get()->reverse()->values();
+         }
+ 
+-        // Marca que esta persona está viendo la conversación: mientras tanto no se le manda push.
+-        Cache::put(self::claveActivo($pedido->id, $user->id), true, now()->addSeconds(self::SEGUNDOS_ACTIVO));
+-
+         // Hasta qué mensaje mío ya leyó la otra persona (para mostrar "Visto").
+         $leidosHasta = Mensaje::query()
+             ->where('pedido_id', $pedido->id)
+@@ -69,6 +62,9 @@ public function index(Request $request, Pedido $pedido): JsonResponse
+         return response()->json([
+             'puede_escribir' => AccesoChat::puedeEscribir($user, $pedido),
+             'maximo'         => (int) config('marketplace.chat.max_caracteres'),
++            // ¿Puede este servidor enviar push? El cliente lo combina con su propia suscripción
++            // para decidir con qué frecuencia consulta.
++            'push'           => app(WebPushService::class)->configurado(),
+             'mensajes'       => $mensajes->map(fn (Mensaje $m) => $this->formato($m, $user))->values(),
+             'leidos_hasta'   => $leidosHasta !== null ? (int) $leidosHasta : null,
+         ]);
+@@ -163,34 +159,15 @@ private function formato(Mensaje $mensaje, User $user): array
+         ];
+     }
+ 
+-    private static function claveActivo(int $pedidoId, int $userId): string
+-    {
+-        return "chat:activo:{$pedidoId}:{$userId}";
+-    }
+-
+     /**
+-     * Push a la otra persona, salvo que ya tenga el chat abierto, y a lo más uno cada
+-     * pocos minutos por conversación: no se llena la pantalla de bloqueo. Un fallo al avisar
+-     * nunca impide que el mensaje se guarde.
++     * Push a la otra persona en CADA mensaje: es lo que despierta su app para que lea lo nuevo
++     * (si está a la vista se actualiza sin mostrar nada; si no, ve la notificación). Un fallo al
++     * avisar nunca impide que el mensaje se guarde.
+      */
+     private function avisarALaContraparte(Pedido $pedido, User $emisor): void
+     {
+         try {
+-            $destino = AccesoChat::contraparte($emisor, $pedido);
+-
+-            if ($destino === null || Cache::has(self::claveActivo($pedido->id, $destino->id))) {
+-                return;
+-            }
+-
+-            $aviso = Cache::add(
+-                "chat:aviso:{$pedido->id}:{$destino->id}",
+-                true,
+-                now()->addMinutes(self::MINUTOS_ENTRE_AVISOS)
+-            );
+-
+-            if ($aviso) {
+-                $destino->notify(new NuevoMensajeChat($pedido->id));
+-            }
++            AccesoChat::contraparte($emisor, $pedido)?->notify(new NuevoMensajeChat($pedido->id));
+         } catch (Throwable $e) {
+             report($e);
+         }
+diff --git a/app/Notifications/NuevoMensajeChat.php b/app/Notifications/NuevoMensajeChat.php
+index 5b17c9d..574a5df 100644
+--- a/app/Notifications/NuevoMensajeChat.php
++++ b/app/Notifications/NuevoMensajeChat.php
+@@ -10,6 +10,9 @@
+ /**
+  * Aviso de mensaje nuevo en el chat de un pedido (RF-22).
+  *
++ * Es el mecanismo de tiempo real del chat: el Service Worker lo recibe, avisa a la app abierta
++ * para que consulte lo nuevo y, si la app no está a la vista, muestra la notificación.
++ *
+  * Solo Web Push: dentro de la app el aviso es el contador de "sin leer", así que no se
+  * guarda en la tabla de notificaciones. El texto NO incluye el mensaje (se ve en la
+  * pantalla de bloqueo).
+@@ -27,14 +30,16 @@ public function via($notifiable): array
+         return app(WebPushService::class)->configurado() ? [WebPushChannel::class] : [];
+     }
+ 
+-    /** @return array{titulo: string, cuerpo: string, url: string, tag: string} */
++    /** @return array{titulo: string, cuerpo: string, url: string, tag: string, tipo: string, pedido_id: int} */
+     public function toWebPush($notifiable): array
+     {
+         return [
+             'titulo' => 'Mensaje nuevo',
+             'cuerpo' => "Tienes un mensaje nuevo en tu pedido #{$this->pedidoId}.",
+             'url'    => '/dashboard?chat='.$this->pedidoId, // el dashboard abre esa conversación
+-            'tag'    => 'chat-'.$this->pedidoId,
++            'tag'    => 'chat-'.$this->pedidoId, // los avisos de una conversación se reemplazan entre sí
++            'tipo'      => 'chat',           // el Service Worker lo usa para avisar a la app abierta
++            'pedido_id' => $this->pedidoId,
+         ];
+     }
+ }
+diff --git a/docs/CHAT.md b/docs/CHAT.md
+index ed3ffbe..e6121d5 100644
+--- a/docs/CHAT.md
++++ b/docs/CHAT.md
+@@ -4,19 +4,28 @@ # Chat del pedido (RF-22)
+ 
+ ## Cómo funciona
+ 
+-- **Recibir (polling).** Con la conversación abierta y la pestaña visible, el navegador pide
+-  `GET /pedidos/{id}/mensajes?despues=ID` cada 4 s (con retroceso 8 / 16 / 30 s si falla). Oculta
+-  o sin red se pausa y se retoma al volver. La primera carga trae los últimos 100 mensajes.
++- **Tiempo real por Web Push, no por consultas constantes.** Cada mensaje nuevo dispara un push
++  a la otra persona (`NuevoMensajeChat`, payload con `tipo: 'chat'` y `pedido_id`). El Service
++  Worker (`resources/js/sw.js`) lo recibe y avisa a las ventanas abiertas con `postMessage`; la
++  conversación abierta entonces pide solo lo nuevo con `GET /pedidos/{id}/mensajes?despues=ID`.
++  Si la app está a la vista no se muestra notificación; si no, sí (misma etiqueta por pedido:
++  se reemplazan, no se apilan). Safari/iPhone exige mostrar siempre la notificación, así que
++  ahí se muestra aunque la app esté abierta.
++- **Red de seguridad.** Un push puede no llegar (permiso denegado, suscripción caducada,
++  navegador sin soporte, VAPID sin configurar). Por eso el chat abierto consulta además:
++  cada 60 s si el dispositivo tiene push, y de 8 a 30 s (más espaciado si la charla está
++  quieta) si no lo tiene. Con la pestaña oculta o sin red se pausa. Si falla: retroceso 8/16/32/60 s.
++  La primera carga trae los últimos 100 mensajes.
+ - **Enviar.** `POST /pedidos/{id}/mensajes` con `Idempotency-Key`. Sin red, o si la respuesta se
+   pierde, el mensaje pasa a la cola offline (`resources/js/offline/sync.js`) **con la misma
+-  clave**, así que el servidor no lo duplica. Mientras tanto se ve como "Pendiente de enviar".
++  clave**, así que el servidor no lo duplica ni vuelve a mandar el push. Mientras tanto se ve
++  como "Pendiente de enviar".
+ - **Leído.** `POST /pedidos/{id}/mensajes/leidos` marca lo recibido; el emisor ve "Visto"
+-  (`leidos_hasta` en la respuesta de lectura).
+-- **Contador.** `GET /chat/no-leidos` da los mensajes sin leer por pedido; el dashboard lo
+-  consulta cada 25 s con la pestaña visible.
+-- **Aviso push.** Solo si la otra persona no tiene el chat abierto (consultó hace menos de
+-  15 s) y a lo más uno cada 5 min por conversación. El aviso **no incluye el mensaje**.
+-  Abre `/dashboard?chat=ID`.
++  (`leidos_hasta` en la respuesta de lectura). Leer no genera push, así que el "Visto" puede
++  tardar hasta la siguiente consulta de respaldo (≈ 1 min) o hasta el siguiente mensaje.
++- **Contador.** `GET /chat/no-leidos` da los mensajes sin leer por pedido. El dashboard lo
++  consulta al montar, al recibir un aviso del Service Worker, al volver a la pestaña y cada 60 s.
++- **El aviso no incluye el mensaje** (se vería en la pantalla de bloqueo). Abre `/dashboard?chat=ID`.
+ 
+ ## Reglas
+ 
+@@ -24,7 +33,7 @@ ## Reglas
+   se le responde 404.
+ - Se escribe mientras el pedido está pendiente, cotizado, aceptado, pagado, en progreso,
+   completado o en disputa. Confirmado, cancelado o rechazado: solo lectura.
+-- Máximo `CHAT_MAX_CARACTERES` (1000) por mensaje. Límites: 30 envíos/min y 90 lecturas/min.
++- Máximo `CHAT_MAX_CARACTERES` (1000) por mensaje. Límites por persona: 30 envíos/min y 90 lecturas/min.
+ - El navegador no guarda los mensajes; solo la cola de envío, que se borra al cerrar sesión.
+ - El frontend muestra el texto con `{{ }}` (nunca `v-html`).
+ 
+@@ -42,3 +51,4 @@ ## Pendiente
+ - Lectura del chat por el mediador cuando el pedido está en disputa (con auditoría).
+ - Paginación hacia atrás de conversaciones de más de 100 mensajes.
+ - Tiempo real con WebSocket (Reverb) si se migra a un servidor con proceso persistente.
++- Enviar el push después de responder (`defer()`): hoy se envía dentro de la petición y suma latencia al emisor.
+diff --git a/resources/js/Components/ChatPedido.vue b/resources/js/Components/ChatPedido.vue
+index 2028b04..032f586 100644
+--- a/resources/js/Components/ChatPedido.vue
++++ b/resources/js/Components/ChatPedido.vue
+@@ -3,13 +3,16 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+ import axios from 'axios'
+ import Modal from '@/Components/Modal.vue'
+ import { accionesPendientes, alSincronizar, encolar, mostrarAviso } from '@/offline/sync'
+-import { noLeidos, quitarNoLeidos, refrescarNoLeidos } from '@/composables/useChat'
++import { chatAbierto, noLeidos, quitarNoLeidos, refrescarNoLeidos } from '@/composables/useChat'
+ 
+ /**
+  * Chat de un pedido (RF-22). Solo texto, solo cliente y prestador.
+  *
+- * - Recibir: polling. Mientras la conversación está abierta y la pestaña visible se pide
+- *   "lo posterior al último id" cada 4 s (con retroceso si falla). Oculta o sin red, se pausa.
++ * - Recibir: por Web Push. Cada mensaje nuevo dispara un push; el Service Worker avisa a esta
++ *   ventana y aquí se pide solo "lo posterior al último id". No se consulta al servidor cada pocos
++ *   segundos. Como red de seguridad (push caído, sin permiso o sin soporte) se consulta con poca
++ *   frecuencia: cada 60 s con push y entre 8 y 30 s sin él (más espaciado si la charla está quieta).
++ *   Oculta o sin red, se pausa y se retoma al volver.
+  * - Enviar: si hay red va directo; si no (o si la respuesta se pierde) pasa a la cola offline
+  *   con la MISMA Idempotency-Key, así el servidor nunca duplica el mensaje (PWA-06).
+  * - Privacidad: los mensajes no se guardan en el dispositivo. Solo la cola de envío, que se
+@@ -21,8 +24,10 @@ const props = defineProps({
+   abrirInicial: { type: Boolean, default: false },
+ })
+ 
+-const INTERVALO_MS = 4000
+ const TIPO_COLA = 'chat.mensaje'
++const RED_DE_SEGURIDAD_MS = 60000 // con push: solo por si un aviso no llega
++const SIN_PUSH_MIN_MS = 8000 // sin push: arranca aquí…
++const SIN_PUSH_MAX_MS = 30000 // …y se espacia hasta aquí si no hay mensajes nuevos
+ 
+ const abierto = ref(false)
+ const cargado = ref(false)
+@@ -31,6 +36,7 @@ const error = ref('')
+ const mensajes = ref([])
+ const leidosHasta = ref(null)
+ const puedeEscribir = ref(true)
++const pushActivo = ref(false) // el servidor puede enviar push Y este dispositivo está suscrito
+ const maximo = ref(1000)
+ const texto = ref('')
+ const enviando = ref([]) // { uuid, contenido }: en camino ahora mismo
+@@ -74,7 +80,7 @@ const irAlFinal = async () => {
+   if (lista.value) lista.value.scrollTop = lista.value.scrollHeight
+ }
+ 
+-// --- Carga y polling ---------------------------------------------------------------
++// --- Carga y consultas ---------------------------------------------------------------
+ 
+ const agregar = (nuevos) => {
+   const ya = new Set(mensajes.value.map((m) => m.id))
+@@ -93,6 +99,19 @@ const marcarLeidos = async () => {
+   }
+ }
+ 
++/** ¿Este dispositivo tiene permiso y una suscripción push vigente? */
++const dispositivoConPush = async () => {
++  try {
++    if (!('serviceWorker' in navigator) || !('PushManager' in window) || Notification.permission !== 'granted') {
++      return false
++    }
++    const registro = await navigator.serviceWorker.ready
++    return !!(await registro.pushManager.getSubscription())
++  } catch {
++    return false
++  }
++}
++
+ const cargar = async () => {
+   const params = cargado.value ? { despues: ultimoId.value } : {}
+   const { data } = await axios.get(route('mensajes.index', props.pedidoId), { params, timeout: 10000 })
+@@ -101,6 +120,7 @@ const cargar = async () => {
+   puedeEscribir.value = data.puede_escribir
+   maximo.value = data.maximo
+   leidosHasta.value = data.leidos_hasta
++  pushActivo.value = data.push && (await dispositivoConPush())
+ 
+   let hayNuevos
+   if (!cargado.value) {
+@@ -113,14 +133,23 @@ const cargar = async () => {
+ 
+   if (hayNuevos && alFinal) irAlFinal()
+   if (data.mensajes.some((m) => !m.mio && !m.leido)) marcarLeidos()
++
++  return data.mensajes.length > 0
+ }
+ 
+ let temporizador = null
++let aviso = null
+ let activo = false
+ let fallos = 0
++let quietos = 0 // consultas seguidas sin mensajes nuevos
+ let montado = true
+ 
+-const espera = () => Math.min(30000, INTERVALO_MS * 2 ** Math.min(fallos, 3)) // 4, 8, 16, 30 s
++const espera = () => {
++  // Si falla la red o el servidor: retroceso 8, 16, 32, 60 s.
++  if (fallos > 0) return Math.min(60000, SIN_PUSH_MIN_MS * 2 ** Math.min(fallos, 3))
++  if (pushActivo.value) return RED_DE_SEGURIDAD_MS
++  return Math.min(SIN_PUSH_MAX_MS, SIN_PUSH_MIN_MS + quietos * 4000)
++}
+ 
+ const programar = () => {
+   clearTimeout(temporizador)
+@@ -137,7 +166,8 @@ async function sondear() {
+   }
+ 
+   try {
+-    await cargar()
++    const hubo = await cargar()
++    quietos = hubo ? 0 : quietos + 1
+     fallos = 0
+     error.value = ''
+   } catch (e) {
+@@ -155,6 +185,20 @@ const alVolverAVer = () => {
+   }
+ }
+ 
++// El Service Worker avisa de un mensaje nuevo (llegó un push): se consulta ahora mismo.
++const alAvisoDelSW = (evento) => {
++  const datos = evento.data
++  if (datos?.tipo !== 'chat:nuevo' || datos.pedidoId !== props.pedidoId || !activo) return
++
++  fallos = 0
++  quietos = 0
++  clearTimeout(aviso)
++  aviso = setTimeout(() => {
++    clearTimeout(temporizador)
++    sondear()
++  }, 250) // varios avisos seguidos se agrupan en una consulta
++}
++
+ const cambioDeRed = () => {
+   sinRed.value = !navigator.onLine
+   if (!sinRed.value) alVolverAVer()
+@@ -163,7 +207,9 @@ const cambioDeRed = () => {
+ function detener() {
+   activo = false
+   clearTimeout(temporizador)
++  clearTimeout(aviso)
+   document.removeEventListener('visibilitychange', alVolverAVer)
++  if (chatAbierto.value === props.pedidoId) chatAbierto.value = null
+ }
+ 
+ const cargarPendientes = async () => {
+@@ -194,7 +240,9 @@ const abrir = async () => {
+   }
+ 
+   fallos = 0
++  quietos = 0
+   activo = true
++  chatAbierto.value = props.pedidoId
+   document.addEventListener('visibilitychange', alVolverAVer)
+   programar()
+ }
+@@ -277,6 +325,7 @@ const enviar = async () => {
+ onMounted(() => {
+   window.addEventListener('online', cambioDeRed)
+   window.addEventListener('offline', cambioDeRed)
++  navigator.serviceWorker?.addEventListener('message', alAvisoDelSW)
+ 
+   // Cuando la cola envía algo, se actualiza la conversación (si está abierta) y los pendientes.
+   alSincronizar(async () => {
+@@ -294,6 +343,7 @@ onBeforeUnmount(() => {
+   detener()
+   window.removeEventListener('online', cambioDeRed)
+   window.removeEventListener('offline', cambioDeRed)
++  navigator.serviceWorker?.removeEventListener('message', alAvisoDelSW)
+ })
+ </script>
+ 
+@@ -334,6 +384,9 @@ onBeforeUnmount(() => {
+       <p v-if="sinRed" class="px-5 py-2 text-xs font-semibold bg-amber-50 text-amber-900 border-b border-amber-200" role="status">
+         Sin conexión. Lo que escribas se enviará cuando vuelva la red.
+       </p>
++      <p v-else-if="cargado && !pushActivo" class="px-5 py-2 text-[11px] text-gris-medio bg-niebla/60 border-b border-slate-200">
++        Los mensajes nuevos pueden tardar unos segundos. Activa las notificaciones para recibirlos al instante.
++      </p>
+ 
+       <!-- Mensajes -->
+       <div ref="lista" class="h-[50vh] overflow-y-auto px-4 py-4 space-y-2 bg-niebla/40" role="log" aria-live="polite" aria-label="Mensajes">
+diff --git a/resources/js/composables/useChat.js b/resources/js/composables/useChat.js
+index d5f64eb..c4af098 100644
+--- a/resources/js/composables/useChat.js
++++ b/resources/js/composables/useChat.js
+@@ -4,13 +4,16 @@ import axios from 'axios'
+ /**
+  * Contador de mensajes sin leer por pedido (RF-22).
+  *
+- * Estado compartido: el dashboard lo consulta cada pocos segundos mientras la pestaña está
+- * visible, y cada conversación lo usa para mostrar su insignia. No guarda nada en el
+- * dispositivo (los mensajes son privados y no se cachean).
++ * Estado compartido: el dashboard lo actualiza cuando el Service Worker avisa de un mensaje
++ * nuevo (push), al volver a la pestaña y, como red de seguridad, cada minuto. No guarda nada en
++ * el dispositivo (los mensajes son privados y no se cachean).
+  */
+ export const noLeidos = reactive({}) // { [pedidoId]: cantidad }
+ export const totalNoLeidos = ref(0)
+ 
++/** Pedido cuya conversación está abierta ahora (null si ninguna). Lo fija ChatPedido. */
++export const chatAbierto = ref(null)
++
+ const recalcular = () => {
+   totalNoLeidos.value = Object.values(noLeidos).reduce((suma, n) => suma + n, 0)
+ }
+@@ -33,7 +36,7 @@ export async function refrescarNoLeidos() {
+     const { data } = await axios.get(route('chat.noLeidos'), { timeout: 8000 })
+     aplicar(data.no_leidos)
+   } catch {
+-    /* sin red o sesión vencida: se reintenta en el siguiente ciclo */
++    /* sin red o sesión vencida: se reintenta en el siguiente aviso o ciclo */
+   }
+ }
+ 
+@@ -44,28 +47,43 @@ export function quitarNoLeidos(pedidoId) {
+ }
+ 
+ /**
+- * Llamar una vez en la página que muestra los pedidos. Consulta al montar, cada `cadaMs`
+- * mientras la pestaña esté visible y al volver a ella.
++ * Llamar una vez en la página que muestra los pedidos. Consulta al montar, cuando el Service
++ * Worker avisa de un mensaje (push), al volver a la pestaña o a la red y, por si el push falla,
++ * cada `cadaMs` mientras la pestaña esté visible.
+  */
+-export function usarNoLeidos(cadaMs = 25000) {
++export function usarNoLeidos(cadaMs = 60000) {
+   let temporizador = null
++  let pendiente = null
+ 
+   const alVolver = () => {
+     if (document.visibilityState === 'visible') refrescarNoLeidos()
+   }
+ 
++  // Varios mensajes seguidos generan varios avisos: se consulta una sola vez.
++  const alAvisoDelSW = (evento) => {
++    const aviso = evento.data
++    if (aviso?.tipo !== 'chat:nuevo') return
++
++    // Si esa conversación está abierta, ella misma la lee y la marca como leída.
++    if (aviso.pedidoId === chatAbierto.value) return
++
++    clearTimeout(pendiente)
++    pendiente = setTimeout(refrescarNoLeidos, 400)
++  }
++
+   onMounted(() => {
+     refrescarNoLeidos()
+-    temporizador = setInterval(() => {
+-      if (document.visibilityState === 'visible') refrescarNoLeidos()
+-    }, cadaMs)
++    temporizador = setInterval(alVolver, cadaMs)
+     document.addEventListener('visibilitychange', alVolver)
+     window.addEventListener('online', alVolver)
++    navigator.serviceWorker?.addEventListener('message', alAvisoDelSW)
+   })
+ 
+   onBeforeUnmount(() => {
+     clearInterval(temporizador)
++    clearTimeout(pendiente)
+     document.removeEventListener('visibilitychange', alVolver)
+     window.removeEventListener('online', alVolver)
++    navigator.serviceWorker?.removeEventListener('message', alAvisoDelSW)
+   })
+ }
+diff --git a/resources/js/sw.js b/resources/js/sw.js
+index 8352bdd..f970875 100644
+--- a/resources/js/sw.js
++++ b/resources/js/sw.js
+@@ -40,6 +40,10 @@ function urlSegura(url) {
+     }
+ }
+ 
++// WebKit (Safari / iPhone) exige mostrar una notificación en CADA push y revoca el permiso si no;
++// Chrome y Firefox permiten no mostrarla cuando la app está a la vista.
++const esWebKit = /^((?!chrome|android|crios|fxios|edg).)*safari/i.test(self.navigator.userAgent);
++
+ self.addEventListener('push', (event) => {
+     let datos = {};
+     try {
+@@ -49,14 +53,32 @@ self.addEventListener('push', (event) => {
+     }
+ 
+     event.waitUntil(
+-        self.registration.showNotification(String(datos.titulo || 'OficiosYa').slice(0, 80), {
+-            body: String(datos.cuerpo || 'Tienes una novedad en tu cuenta.').slice(0, 200),
+-            icon: '/icons/icon-192x192.png',
+-            badge: '/icons/icon-192x192.png',
+-            tag: typeof datos.tag === 'string' ? datos.tag : undefined,
+-            lang: 'es-MX',
+-            data: { url: urlSegura(datos.url) },
+-        }),
++        (async () => {
++            const esChat = datos.tipo === 'chat' && Number.isInteger(datos.pedido_id);
++
++            if (esChat) {
++                // Mensaje nuevo: las ventanas abiertas consultan solo lo nuevo, en este momento.
++                // Así el chat no necesita preguntarle al servidor cada pocos segundos.
++                const ventanas = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
++                ventanas.forEach((v) => v.postMessage({ tipo: 'chat:nuevo', pedidoId: datos.pedido_id }));
++
++                // Si la app está a la vista ya lo está viendo: no se muestra la notificación.
++                if (!esWebKit && ventanas.some((v) => v.visibilityState === 'visible' && v.focused)) return;
++            }
++
++            const conTag = typeof datos.tag === 'string';
++
++            await self.registration.showNotification(String(datos.titulo || 'OficiosYa').slice(0, 80), {
++                body: String(datos.cuerpo || 'Tienes una novedad en tu cuenta.').slice(0, 200),
++                icon: '/icons/icon-192x192.png',
++                badge: '/icons/icon-192x192.png',
++                tag: conTag ? datos.tag : undefined,
++                // Cada mensaje de chat vuelve a avisar (misma etiqueta: reemplaza, no apila). renotify exige tag.
++                renotify: conTag && esChat,
++                lang: 'es-MX',
++                data: { url: urlSegura(datos.url) },
++            });
++        })(),
+     );
+ });
+ 
+diff --git a/routes/web.php b/routes/web.php
+index 9304d46..c9d00c8 100644
+--- a/routes/web.php
++++ b/routes/web.php
+@@ -125,7 +125,7 @@
+         ->whereNumber('foto')
+         ->name('evidencias.destroy');
+ 
+-    // Chat del pedido (RF-22): solo cliente y prestador. Polling para recibir; la cola offline
++    // Chat del pedido (RF-22): solo cliente y prestador. Se recibe por Web Push (el cliente consulta al avisarle el Service Worker); la cola offline
+     // reenvía con Idempotency-Key lo escrito sin conexión.
+     Route::get('/pedidos/{pedido}/mensajes', [MensajeController::class, 'index'])
+         ->whereNumber('pedido')
+diff --git a/tests/Feature/ChatPedidoTest.php b/tests/Feature/ChatPedidoTest.php
+index c125a13..c51511d 100644
+--- a/tests/Feature/ChatPedidoTest.php
++++ b/tests/Feature/ChatPedidoTest.php
+@@ -17,8 +17,8 @@
+ use Tests\TestCase;
+ 
+ /**
+- * RF-22 — Chat del pedido: solo cliente y prestador, solo texto, tiempo casi real por
+- * polling, envío idempotente (cola offline) y retención de datos.
++ * RF-22 — Chat del pedido: solo cliente y prestador, solo texto, tiempo real por Web Push,
++ * envío idempotente (cola offline) y retención de datos.
+  */
+ class ChatPedidoTest extends TestCase
+ {
+@@ -127,7 +127,7 @@ public function test_cliente_y_prestador_conversan_y_el_sondeo_trae_solo_lo_nuev
+         $this->assertSame([true, false], array_column($carga->json('mensajes'), 'mio'));
+         $carga->assertJsonPath('puede_escribir', true)->assertJsonPath('maximo', 200);
+ 
+-        // Polling: solo lo posterior al último que ya tiene.
++        // Al avisarle el push, el cliente pide solo lo posterior al último que ya tiene.
+         $sondeo = $this->leer($cliente, $pedido, ['despues' => $primero->json('mensaje.id')])->assertOk();
+         $this->assertCount(1, $sondeo->json('mensajes'));
+         $this->assertSame('En una hora estoy ahí.', $sondeo->json('mensajes.0.contenido'));
+@@ -288,7 +288,7 @@ public function test_el_contador_cuenta_solo_lo_que_me_enviaron_sin_leer(): void
+ 
+     /* ------------------------------- avisos push ------------------------------- */
+ 
+-    public function test_avisa_por_push_una_sola_vez_y_sin_mostrar_el_mensaje(): void
++    public function test_cada_mensaje_dispara_un_push_sin_mostrar_el_texto(): void
+     {
+         config(['services.webpush.public_key' => 'pub', 'services.webpush.private_key' => 'priv']);
+         Notification::fake();
+@@ -297,18 +297,22 @@ public function test_avisa_por_push_una_sola_vez_y_sin_mostrar_el_mensaje(): voi
+         $cliente = $this->cliente();
+         $pedido  = $this->pedido($servicio, $cliente);
+ 
++        // El push es el tiempo real del chat: sale en CADA mensaje, no uno cada tanto.
+         $this->enviar($cliente, $pedido, 'Primer mensaje secreto');
+         $this->enviar($cliente, $pedido, 'Segundo mensaje');
+ 
+-        Notification::assertSentToTimes($prestador, NuevoMensajeChat::class, 1);
++        Notification::assertSentToTimes($prestador, NuevoMensajeChat::class, 2);
+         Notification::assertNotSentTo($cliente, NuevoMensajeChat::class);
+ 
+         $aviso = (new NuevoMensajeChat($pedido->id))->toWebPush($prestador);
+         $this->assertStringNotContainsString('secreto', json_encode($aviso));
+         $this->assertSame('/dashboard?chat='.$pedido->id, $aviso['url']);
++        $this->assertSame('chat', $aviso['tipo'], 'El Service Worker lo usa para avisar a la app abierta.');
++        $this->assertSame($pedido->id, $aviso['pedido_id']);
++        $this->assertSame('chat-'.$pedido->id, $aviso['tag']);
+     }
+ 
+-    public function test_no_avisa_si_la_otra_persona_tiene_el_chat_abierto(): void
++    public function test_un_reintento_con_la_misma_clave_no_manda_otro_push(): void
+     {
+         config(['services.webpush.public_key' => 'pub', 'services.webpush.private_key' => 'priv']);
+         Notification::fake();
+@@ -317,10 +321,24 @@ public function test_no_avisa_si_la_otra_persona_tiene_el_chat_abierto(): void
+         $cliente = $this->cliente();
+         $pedido  = $this->pedido($servicio, $cliente);
+ 
+-        $this->leer($prestador, $pedido)->assertOk(); // el prestador está mirando la conversación
+-        $this->enviar($cliente, $pedido, 'Hola')->assertCreated();
++        $this->enviar($cliente, $pedido, 'Desde la cola offline', self::CLAVE)->assertCreated();
++        $this->enviar($cliente, $pedido, 'Desde la cola offline', self::CLAVE)->assertOk();
++
++        Notification::assertSentToTimes($prestador, NuevoMensajeChat::class, 1);
++    }
++
++    public function test_la_lectura_informa_si_el_servidor_puede_enviar_push(): void
++    {
++        [, , $servicio] = $this->prestador();
++        $cliente = $this->cliente();
++        $pedido  = $this->pedido($servicio, $cliente);
++
++        // El cliente web usa este dato para decidir con qué frecuencia consulta.
++        config(['services.webpush.public_key' => 'pub', 'services.webpush.private_key' => 'priv']);
++        $this->leer($cliente, $pedido)->assertOk()->assertJsonPath('push', true);
+ 
+-        Notification::assertNothingSent();
++        config(['services.webpush.public_key' => null, 'services.webpush.private_key' => null]);
++        $this->leer($cliente, $pedido)->assertOk()->assertJsonPath('push', false);
+     }
+ 
+     public function test_un_mensaje_se_guarda_aunque_el_push_no_este_configurado(): void

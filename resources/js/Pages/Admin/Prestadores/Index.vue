@@ -10,6 +10,8 @@ const props = defineProps({
 
 const prestadorAProcesar = ref(null)
 const accionVerificacion = ref('')
+const motivoVerificacion = ref('')
+const errorMotivo = ref('')
 
 const filtrar = (estado) => {
   router.get(route('admin.prestadores.index'), { estado }, { preserveState: true, replace: true })
@@ -18,6 +20,8 @@ const filtrar = (estado) => {
 const abrirModal = (prestador, accion) => {
   prestadorAProcesar.value = prestador
   accionVerificacion.value = accion
+  motivoVerificacion.value = ''
+  errorMotivo.value = ''
 }
 
 const procesarVerificacion = () => {
@@ -25,11 +29,13 @@ const procesarVerificacion = () => {
 
   router.patch(route('admin.prestadores.updateStatus', prestadorAProcesar.value.id), {
     estado: accionVerificacion.value,
+    motivo: accionVerificacion.value === 'rechazado' ? motivoVerificacion.value : null,
   }, {
     preserveScroll: true,
     onSuccess: () => {
       prestadorAProcesar.value = null
     },
+    onError: (e) => (errorMotivo.value = e.motivo || ''),
   })
 }
 
@@ -276,6 +282,19 @@ const iconos = {
                 ¿Confirmas que quieres {{ esAprobacion ? 'aprobar' : 'rechazar' }} a
                 <strong class="text-principal">{{ nombreDe(prestadorAProcesar) }}</strong>?
               </p>
+            </div>
+
+            <div v-if="!esAprobacion" class="text-left space-y-1.5">
+              <label for="motivo-rechazo" class="text-xs font-bold text-principal">Motivo del rechazo (lo verá el prestador)</label>
+              <textarea
+                id="motivo-rechazo"
+                v-model="motivoVerificacion"
+                rows="3"
+                maxlength="500"
+                class="block w-full rounded-xl border-slate-300 focus:border-principal focus:ring-principal text-sm"
+                placeholder="Ej.: La foto de la INE está borrosa; sube una nueva con buena luz."
+              ></textarea>
+              <p v-if="errorMotivo" class="text-xs font-semibold text-red-600" role="alert">{{ errorMotivo }}</p>
             </div>
 
             <div class="flex gap-3 pt-2">

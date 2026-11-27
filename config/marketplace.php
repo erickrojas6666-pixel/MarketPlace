@@ -33,6 +33,21 @@ return [
         'minutos_url_privada'      => 5,
     ],
 
+    // Verificación de identidad (RF-05 a RF-08). Los documentos van cifrados en el disco privado.
+    'verificacion' => [
+        'tipos_requeridos'       => ['ine_frente', 'ine_reverso', 'comprobante_domicilio'],
+        'lado_max'               => 2000,   // px: la INE debe seguir legible
+        'exigir_documentos'      => (bool) env('VERIFICACION_EXIGIR_DOCUMENTOS', true),
+        'retencion_dias'         => (int) env('VERIFICACION_RETENCION_DIAS', 180),
+        'minutos_acceso_revisor' => 15,
+    ],
+
+    // Chat del pedido (RF-22). Ver docs/CHAT.md.
+    'chat' => [
+        'max_caracteres' => (int) env('CHAT_MAX_CARACTERES', 1000),
+        'retencion_dias' => (int) env('CHAT_RETENCION_DIAS', 180), // tras terminar el pedido
+    ],
+
     // Interruptores de módulos (ver TransicionesPedido::mapa()).
     'cotizaciones_habilitadas' => (bool) env('MARKETPLACE_COTIZACIONES', false),
     'escrow_habilitado'        => (bool) env('MARKETPLACE_ESCROW', false),

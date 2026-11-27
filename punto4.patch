@@ -1,0 +1,388 @@
+diff --git a/.github/dependabot.yml b/.github/dependabot.yml
+new file mode 100644
+index 0000000..9fd45f7
+--- /dev/null
++++ b/.github/dependabot.yml
+@@ -0,0 +1,16 @@
++version: 2
++updates:
++  - package-ecosystem: composer
++    directory: /
++    schedule:
++      interval: weekly
++    open-pull-requests-limit: 5
++  - package-ecosystem: npm
++    directory: /
++    schedule:
++      interval: weekly
++    open-pull-requests-limit: 5
++  - package-ecosystem: github-actions
++    directory: /
++    schedule:
++      interval: monthly
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+new file mode 100644
+index 0000000..252be12
+--- /dev/null
++++ b/.github/workflows/ci.yml
+@@ -0,0 +1,128 @@
++name: CI
++
++on:
++  push:
++    branches: [main, develop]
++  pull_request:
++
++concurrency:
++  group: ci-${{ github.ref }}
++  cancel-in-progress: true
++
++permissions:
++  contents: read
++
++env:
++  PHP_VERSION: '8.4'
++  NODE_VERSION: '22'
++
++jobs:
++  # ---------------------------------------------------------------------------
++  # Pruebas en los DOS motores: MySQL (desarrollo) y PostgreSQL (Render, producción).
++  # Si algo funciona en MySQL pero rompe en PostgreSQL, se ve aquí y no en producción.
++  # ---------------------------------------------------------------------------
++  pruebas:
++    name: Pruebas (${{ matrix.db }})
++    runs-on: ubuntu-latest
++    # PostgreSQL empieza como informativo: quita esta línea cuando esté en verde.
++    continue-on-error: ${{ matrix.db == 'pgsql' }}
++    strategy:
++      fail-fast: false
++      matrix:
++        include:
++          - db: mysql
++            port: 3306
++          - db: pgsql
++            port: 5432
++
++    services:
++      mysql:
++        image: mysql:8.4
++        env:
++          MYSQL_ROOT_PASSWORD: secret
++          MYSQL_DATABASE: marketplace_test
++        ports: ['3306:3306']
++        options: >-
++          --health-cmd="mysqladmin ping -h 127.0.0.1 -psecret"
++          --health-interval=5s --health-timeout=5s --health-retries=20
++      postgres:
++        image: postgres:16
++        env:
++          POSTGRES_PASSWORD: secret
++          POSTGRES_DB: marketplace_test
++        ports: ['5432:5432']
++        options: >-
++          --health-cmd="pg_isready -U postgres"
++          --health-interval=5s --health-timeout=5s --health-retries=20
++
++    # Las variables reales del entorno tienen prioridad sobre las de phpunit.xml.
++    env:
++      DB_CONNECTION: ${{ matrix.db }}
++      DB_HOST: 127.0.0.1
++      DB_PORT: ${{ matrix.port }}
++      DB_DATABASE: marketplace_test
++      DB_USERNAME: ${{ matrix.db == 'mysql' && 'root' || 'postgres' }}
++      DB_PASSWORD: secret
++
++    steps:
++      - uses: actions/checkout@v4
++
++      - uses: shivammathur/setup-php@v2
++        with:
++          php-version: ${{ env.PHP_VERSION }}
++          extensions: gd, exif, mbstring, pdo_mysql, pdo_pgsql, pdo_sqlite, bcmath, gmp, intl, zip
++          coverage: none
++          tools: composer:v2
++
++      - name: Caché de Composer
++        uses: actions/cache@v4
++        with:
++          path: ~/.composer/cache
++          key: composer-${{ hashFiles('composer.lock') }}
++          restore-keys: composer-
++
++      - run: cp .env.example .env
++      - run: composer install --no-interaction --prefer-dist --no-progress
++      - run: php artisan key:generate
++
++      # Las migraciones DEBEN crear todo el esquema: es lo que ejecuta Render al desplegar.
++      - name: Migrar
++        run: php artisan migrate --force
++
++      - name: Pruebas
++        run: php artisan test
++
++  # ---------------------------------------------------------------------------
++  # Frontend: compila y audita dependencias de producción.
++  # ---------------------------------------------------------------------------
++  frontend:
++    name: Frontend (build y auditoría)
++    runs-on: ubuntu-latest
++    steps:
++      - uses: actions/checkout@v4
++
++      - uses: actions/setup-node@v4
++        with:
++          node-version: ${{ env.NODE_VERSION }}
++          cache: npm
++
++      - run: npm ci
++      - run: npm run build
++      - name: Auditoría de dependencias
++        run: npm audit --omit=dev --audit-level=high
++
++  # ---------------------------------------------------------------------------
++  # Secretos: busca llaves y tokens en todo el historial (imagen oficial, sin licencia).
++  # ---------------------------------------------------------------------------
++  secretos:
++    name: Secretos (gitleaks)
++    runs-on: ubuntu-latest
++    steps:
++      - uses: actions/checkout@v4
++        with:
++          fetch-depth: 0
++
++      - name: Escanear
++        run: |
++          docker run --rm -v "${{ github.workspace }}:/repo" zricethezav/gitleaks:v8.21.2 \
++            detect --source /repo --no-banner --redact --verbose
+diff --git a/docs/decisiones/ADR-001-geolocalizacion-y-base-de-datos.md b/docs/decisiones/ADR-001-geolocalizacion-y-base-de-datos.md
+new file mode 100644
+index 0000000..80bde16
+--- /dev/null
++++ b/docs/decisiones/ADR-001-geolocalizacion-y-base-de-datos.md
+@@ -0,0 +1,56 @@
++# ADR-001: Geolocalización y motor de base de datos
++
++**Estado:** propuesta para aprobar por el equipo · **Fecha:** 2026-11-20
++
++## Contexto
++Los documentos del proyecto (presentación de arquitectura y requerimientos técnicos) describen
++"MySQL 8 con índices espaciales (SRID 4326)". El código construido hace otra cosa:
++
++| | Documentado | Construido |
++|---|---|---|
++| Ubicación del prestador | columna `POINT` SRID 4326 + índice espacial | `latitud` / `longitud` (decimales) + índice compuesto `perfiles_prestador_lat_lng_index` |
++| Búsqueda por cercanía | `ST_Distance_Sphere` / `ST_Within` | *Bounding box* (usa el índice) + fórmula de Haversine solo sobre los candidatos |
++| Motor | MySQL 8 | MySQL 8 en desarrollo, **PostgreSQL en Render** y SQLite opcional en pruebas |
++
++## Decisión
++**Mantener `latitud`/`longitud` + Haversine y actualizar los documentos** (no migrar a columnas espaciales).
++
++## Por qué
++1. **Portabilidad real.** Hoy el mismo código corre en MySQL (local), PostgreSQL (producción) y,
++   con funciones registradas, SQLite. `POINT`/`ST_*` son distintos en cada motor (en PostgreSQL
++   exigirían PostGIS) y obligarían a mantener dos implementaciones.
++2. **El volumen no lo justifica.** El caso de uso es "prestadores a ≤ 10–15 km" sobre miles de
++   filas, no millones. El *bounding box* usa el índice `(latitud, longitud)` y reduce los
++   candidatos a unas decenas antes de calcular la distancia exacta.
++3. **Ya está resuelto lo difícil:** la fórmula está protegida con `LEAST(1, …)` (evita el error
++   de `ACOS` fuera de dominio en PostgreSQL) y el radio de cobertura del prestador se respeta.
++4. **Privacidad (ver abajo).** Una columna `POINT` exacta facilita guardar la ubicación precisa;
++   el diseño actual guarda coordenadas aproximadas por diseño.
++
++## Privacidad de la ubicación del prestador
++- Las coordenadas se guardan **redondeadas a 3 decimales (≈ 110 m)** y nunca salen en respuestas
++  públicas: del prestador solo viaja la **distancia redondeada a 0.1 km**.
++- *Riesgo residual:* con muchas consultas desde puntos distintos, alguien podría triangular la
++  zona del prestador (precisión ≈ 100–200 m). Mitigaciones disponibles sin cambiar la
++  arquitectura: redondear a 2 decimales (≈ 1.1 km, suficiente para radios de 10–15 km) o
++  mostrar la distancia por rangos ("a menos de 5 km"). Decisión pendiente del equipo.
++- La dirección exacta del domicilio del **cliente** se guarda cifrada (cast `encrypted`).
++
++## Cuándo reconsiderar
++Si el catálogo supera ~100 000 prestadores, o se necesitan polígonos de cobertura (colonias,
++alcaldías) o búsquedas "dentro de esta zona". Entonces: PostgreSQL + PostGIS (`geography(Point,4326)`
++con índice GiST) y migrar la consulta; el contrato de `scopeCercanosA()` no cambia.
++
++## Base de datos en producción
++Render ofrece PostgreSQL administrado; el proyecto ya incluye `pdo_pgsql` y `pdo_mysql`.
++Se decide **desarrollar en MySQL y desplegar en PostgreSQL** solo si el CI prueba ambos motores
++(`.github/workflows/ci.yml`, matriz `mysql` / `pgsql`). Sin esa verificación, un cambio válido en
++MySQL puede romper producción sin que nadie lo vea.
++
++## Textos a actualizar en los documentos
++- **Presentación de arquitectura, diapositiva 05 ("Persistencia MySQL 8"):** cambiar
++  «Índices Espaciales (SRID 4326) — Consultas geoespaciales precisas para zonas de cobertura» por
++  «Índice (latitud, longitud) + Haversine — Búsqueda por cercanía portable entre MySQL y PostgreSQL;
++  coordenadas aproximadas para proteger la ubicación del prestador».
++- **Requerimientos técnicos / stack:** donde diga «MySQL 8», indicar «MySQL 8 (desarrollo) y
++  PostgreSQL (producción en Render)».
+diff --git a/tests/Feature/GeolocalizacionTest.php b/tests/Feature/GeolocalizacionTest.php
+new file mode 100644
+index 0000000..b17d5be
+--- /dev/null
++++ b/tests/Feature/GeolocalizacionTest.php
+@@ -0,0 +1,164 @@
++<?php
++
++namespace Tests\Feature;
++
++use App\Models\Categoria;
++use App\Models\PerfilPrestador;
++use App\Models\Servicio;
++use App\Models\User;
++use Illuminate\Foundation\Testing\RefreshDatabase;
++use Illuminate\Support\Facades\DB;
++use Tests\TestCase;
++
++/**
++ * Búsqueda por cercanía (docs/decisiones/ADR-001): bounding box + Haversine sobre columnas
++ * latitud/longitud. Corre igual en MySQL, PostgreSQL y SQLite (en SQLite se registran las
++ * funciones matemáticas que ese motor no trae).
++ */
++class GeolocalizacionTest extends TestCase
++{
++    use RefreshDatabase;
++
++    /** Zócalo de la Ciudad de México. */
++    private const LAT = 19.4326;
++    private const LNG = -99.1332;
++
++    protected function setUp(): void
++    {
++        parent::setUp();
++
++        if (DB::connection()->getDriverName() === 'sqlite') {
++            $pdo = DB::connection()->getPdo();
++            $pdo->sqliteCreateFunction('RADIANS', 'deg2rad', 1);
++            $pdo->sqliteCreateFunction('COS', 'cos', 1);
++            $pdo->sqliteCreateFunction('SIN', 'sin', 1);
++            $pdo->sqliteCreateFunction('ACOS', 'acos', 1);
++            $pdo->sqliteCreateFunction('LEAST', fn (...$v) => min($v), -1);
++        }
++    }
++
++    /** Distancia de referencia calculada en PHP (misma fórmula, radio 6371 km). */
++    private function km(float $lat1, float $lng1, float $lat2, float $lng2): float
++    {
++        $a = sin(deg2rad($lat2 - $lat1) / 2) ** 2
++            + cos(deg2rad($lat1)) * cos(deg2rad($lat2)) * sin(deg2rad($lng2 - $lng1) / 2) ** 2;
++
++        return 6371 * 2 * asin(sqrt($a));
++    }
++
++    private function servicioEn(?float $lat, ?float $lng, int $radioCobertura = 15, string $titulo = 'Servicio'): Servicio
++    {
++        $user   = User::factory()->create();
++        $perfil = PerfilPrestador::create([
++            'user_id'             => $user->id,
++            'estado_verificacion' => 'verificado',
++            'latitud'             => $lat,
++            'longitud'            => $lng,
++            'radio_cobertura_km'  => $radioCobertura,
++        ]);
++
++        return Servicio::create([
++            'perfil_prestador_id' => $perfil->id,
++            'categoria_id'        => Categoria::firstOrCreate(['nombre' => 'Plomería'])->id,
++            'titulo'              => $titulo,
++            'descripcion'         => 'Descripción de prueba.',
++            'precio_base'         => 300,
++            'activo'              => true,
++        ]);
++    }
++
++    private function cercanos(float $km): \Illuminate\Support\Collection
++    {
++        return Servicio::query()->cercanosA(self::LAT, self::LNG, $km)->get();
++    }
++
++    public function test_solo_aparecen_los_prestadores_dentro_del_radio_pedido(): void
++    {
++        $cerca = $this->servicioEn(self::LAT + 0.045, self::LNG, titulo: 'A 5 km');        // ≈ 5.0 km al norte
++        $medio = $this->servicioEn(self::LAT, self::LNG + 0.09, titulo: 'A 9 km');          // ≈ 9.4 km al este
++        $lejos = $this->servicioEn(self::LAT + 0.18, self::LNG, titulo: 'A 20 km');         // ≈ 20 km
++
++        $ids = $this->cercanos(10)->pluck('id')->all();
++
++        $this->assertContains($cerca->id, $ids);
++        $this->assertContains($medio->id, $ids);
++        $this->assertNotContains($lejos->id, $ids);
++        $this->assertContains($lejos->id, $this->cercanos(25)->pluck('id')->all());
++    }
++
++    public function test_respeta_el_radio_de_cobertura_que_declaro_el_prestador(): void
++    {
++        // A 5 km, pero solo atiende hasta 3 km a la redonda: no debe salir aunque el cliente busque a 10 km.
++        $estrecho = $this->servicioEn(self::LAT + 0.045, self::LNG, radioCobertura: 3);
++        $amplio   = $this->servicioEn(self::LAT + 0.045, self::LNG, radioCobertura: 15);
++
++        $ids = $this->cercanos(10)->pluck('id')->all();
++
++        $this->assertNotContains($estrecho->id, $ids);
++        $this->assertContains($amplio->id, $ids);
++    }
++
++    public function test_los_prestadores_sin_ubicacion_no_aparecen_en_busquedas_por_cercania(): void
++    {
++        $sinUbicacion = $this->servicioEn(null, null);
++
++        $this->assertNotContains($sinUbicacion->id, $this->cercanos(50)->pluck('id')->all());
++    }
++
++    public function test_el_mismo_punto_da_distancia_cero_y_no_falla(): void
++    {
++        // Regresión: ACOS(1.0000000000000002) lanza error en PostgreSQL; el LEAST(1, …) lo evita.
++        $mismo = $this->servicioEn(self::LAT, self::LNG);
++
++        $resultado = $this->cercanos(5)->firstWhere('id', $mismo->id);
++
++        $this->assertNotNull($resultado);
++        $this->assertEqualsWithDelta(0.0, (float) $resultado->distancia_km, 0.1);
++    }
++
++    public function test_la_distancia_es_correcta_y_esta_redondeada_a_un_decimal(): void
++    {
++        $servicio = $this->servicioEn(self::LAT + 0.045, self::LNG);
++        $esperado = $this->km(self::LAT, self::LNG, self::LAT + 0.045, self::LNG);
++
++        $resultado = $this->cercanos(10)->firstWhere('id', $servicio->id);
++
++        $this->assertEqualsWithDelta($esperado, (float) $resultado->distancia_km, 0.1);
++        $this->assertEqualsWithDelta(round((float) $resultado->distancia_km, 1), (float) $resultado->distancia_km, 0.0001);
++    }
++
++    public function test_ordena_del_mas_cercano_al_mas_lejano(): void
++    {
++        $tercero = $this->servicioEn(self::LAT + 0.08, self::LNG, titulo: 'C');
++        $primero = $this->servicioEn(self::LAT + 0.01, self::LNG, titulo: 'A');
++        $segundo = $this->servicioEn(self::LAT + 0.04, self::LNG, titulo: 'B');
++
++        $this->assertSame(
++            [$primero->id, $segundo->id, $tercero->id],
++            $this->cercanos(20)->pluck('id')->all()
++        );
++    }
++
++    public function test_el_catalogo_publico_filtra_por_cercania_y_nunca_expone_coordenadas(): void
++    {
++        $cerca = $this->servicioEn(self::LAT + 0.045, self::LNG, titulo: 'Cerca de ti');
++        $this->servicioEn(self::LAT + 0.18, self::LNG, titulo: 'Muy lejos');
++
++        $respuesta = $this->get(route('servicios.index', ['lat' => self::LAT, 'lng' => self::LNG, 'radio_km' => 10]))->assertOk();
++
++        $servicios = $respuesta->viewData('page')['props']['servicios']['data'];
++        $this->assertSame([$cerca->id], array_column($servicios, 'id'));
++
++        $json = json_encode($respuesta->viewData('page')['props']);
++        $this->assertStringNotContainsString('latitud', $json);
++        $this->assertStringNotContainsString('longitud', $json);
++    }
++
++    public function test_el_catalogo_valida_las_coordenadas_y_el_radio(): void
++    {
++        $this->get(route('servicios.index', ['lat' => 95, 'lng' => 0]))->assertSessionHasErrors('lat');
++        $this->get(route('servicios.index', ['lat' => 19, 'lng' => 200]))->assertSessionHasErrors('lng');
++        $this->get(route('servicios.index', ['lat' => 19]))->assertSessionHasErrors('lng');
++        $this->get(route('servicios.index', ['lat' => 19, 'lng' => -99, 'radio_km' => 999]))->assertSessionHasErrors('radio_km');
++    }
++}

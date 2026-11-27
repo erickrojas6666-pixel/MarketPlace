@@ -80,6 +80,40 @@ class MercadoPagoService
     }
 
     /**
+     * Devuelve el pago completo al cliente (POST /v1/payments/{id}/refunds).
+     *
+     * La clave de idempotencia debe ser estable para esta devolución: si hay que reintentar
+     * después de un fallo, Mercado Pago reconoce la misma operación y no devuelve dos veces.
+     *
+     * @return bool true si la pasarela aceptó la devolución
+     */
+    public function reembolsar(string $paymentId, string $claveIdempotencia): bool
+    {
+        // Solo dígitos: el id va dentro de la URL y no debe poder alterarla.
+        if (! ctype_digit($paymentId)) {
+            return false;
+        }
+
+        try {
+            // Cuerpo "{}" = devolución total.
+            $respuesta = $this->http()
+                ->withHeaders(['X-Idempotency-Key' => $claveIdempotencia])
+                ->withBody('{}', 'application/json')
+                ->post(self::BASE.'/v1/payments/'.$paymentId.'/refunds');
+
+            if ($respuesta->successful()) {
+                return true;
+            }
+
+            Log::warning('Mercado Pago rechazó la devolución', ['codigo' => $respuesta->status()]);
+        } catch (Throwable $e) {
+            Log::warning('Mercado Pago no respondió a la devolución', ['tipo' => class_basename($e)]);
+        }
+
+        return false;
+    }
+
+    /**
      * Valida la cabecera x-signature de una notificación (HMAC-SHA256 con el secreto de la
      * aplicación). Sin MP_WEBHOOK_SECRET no se verifica, lo cual es seguro porque de todos
      * modos el pago se confirma contra la API.

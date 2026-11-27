@@ -12,6 +12,8 @@ const page = usePage()
 // Ambos flags los calcula HandleInertiaRequests a partir de los roles de Spatie.
 const esAdmin = computed(() => !!page.props.auth?.user?.esAdmin)
 const esPrestador = computed(() => !!page.props.auth?.user?.esPrestador)
+// Mediador o superadmin: ven la cola de disputas (rutas /mediacion).
+const esMediador = computed(() => !!page.props.auth?.user?.esMediador)
 const rol = computed(() => (esAdmin.value ? 'Admin' : esPrestador.value ? 'Prestador' : 'Cliente'))
 
 const cerrarMenu = () => (menuAbierto.value = false)
@@ -36,6 +38,7 @@ const iconos = {
   ],
   salir: ['M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1'],
   cerrar: ['M6 18L18 6M6 6l12 12'],
+  disputas: ['M3 6l3 1m0 0l-3 9a5.002 5.002 0 006.001 0M6 7l3 9M6 7l6-2m6 2l3-1m-3 1l-3 9a5.002 5.002 0 006.001 0M18 7l3 9m-3-9l-6-2m0-2v2m0 16V5m0 16H9m3 0h3'],
 }
 
 // Clases de los enlaces del menú superior (el enlace activo va en dorado)
@@ -63,11 +66,26 @@ const secciones = computed(() => {
     },
   ]
 
+  if (esMediador.value) {
+    principal.push({
+      nombre: 'Disputas',
+      href: route('mediacion.disputas.index'),
+      activo: !!route().current('mediacion.*'),
+      icono: 'disputas',
+    })
+  }
+
   if (esPrestador.value) {
     principal.push({
       nombre: 'Mi perfil de prestador',
       href: route('prestador.perfil.edit'),
       activo: !!route().current('prestador.perfil.edit'),
+      icono: 'prestador',
+    })
+    principal.push({
+      nombre: 'Verificación de identidad',
+      href: route('prestador.verificacion.show'),
+      activo: !!route().current('prestador.verificacion.*'),
       icono: 'prestador',
     })
   }
@@ -150,6 +168,15 @@ const cajaEscritorioSalir =
                   Explorar Servicios
                 </Link>
 
+                <!-- Cola de disputas: solo mediador o superadmin -->
+                <Link
+                  v-if="esMediador"
+                  :href="route('mediacion.disputas.index')"
+                  :class="claseEnlace(route().current('mediacion.*'))"
+                >
+                  Disputas
+                </Link>
+
                 <!-- "Perfil Prestador" solo para usuarios con rol prestador -->
                 <Link
                   v-if="esPrestador"
@@ -157,6 +184,14 @@ const cajaEscritorioSalir =
                   :class="claseEnlace(route().current('prestador.perfil.edit'))"
                 >
                   Perfil Prestador
+                </Link>
+
+                <Link
+                  v-if="esPrestador"
+                  :href="route('prestador.verificacion.show')"
+                  :class="claseEnlace(route().current('prestador.verificacion.*'))"
+                >
+                  Verificación
                 </Link>
               </div>
             </div>
@@ -203,6 +238,15 @@ const cajaEscritorioSalir =
                           </svg>
                         </span>
                         Perfil prestador
+                      </Link>
+
+                      <Link v-if="esPrestador" :href="route('prestador.verificacion.show')" :class="itemEscritorio">
+                        <span :class="cajaEscritorio">
+                          <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z" />
+                          </svg>
+                        </span>
+                        Verificación de identidad
                       </Link>
 
                       <Link :href="route('profile.edit')" :class="itemEscritorio">

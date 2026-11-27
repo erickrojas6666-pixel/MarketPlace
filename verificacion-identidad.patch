@@ -1,0 +1,1739 @@
+diff --git a/.env.example b/.env.example
+index bc36279..b5680e7 100644
+--- a/.env.example
++++ b/.env.example
+@@ -86,3 +86,7 @@ R2_ENDPOINT=
+ R2_BUCKET_PUBLICO=
+ R2_URL_PUBLICA=
+ R2_BUCKET_PRIVADO=
++
++# --- Verificación de identidad (INE / comprobante). Ver docs/VERIFICACION.md ---
++VERIFICACION_EXIGIR_DOCUMENTOS=true
++VERIFICACION_RETENCION_DIAS=180
+diff --git a/app/Console/Commands/PurgarDocumentosVerificacion.php b/app/Console/Commands/PurgarDocumentosVerificacion.php
+new file mode 100644
+index 0000000..2b456b5
+--- /dev/null
++++ b/app/Console/Commands/PurgarDocumentosVerificacion.php
+@@ -0,0 +1,65 @@
++<?php
++
++namespace App\Console\Commands;
++
++use App\Models\DocumentosVerificacion;
++use App\Models\PerfilPrestador;
++use App\Services\AlmacenFotos;
++use App\Support\Auditoria;
++use Illuminate\Console\Command;
++use Illuminate\Support\Facades\DB;
++
++/**
++ * Retención de datos (LFPDPPP, minimización): elimina el ARCHIVO de los documentos de
++ * identidad ya resueltos pasado el plazo. Se conserva el registro (qué, cuándo, quién revisó).
++ */
++class PurgarDocumentosVerificacion extends Command
++{
++    protected $signature = 'verificacion:purgar-documentos {--dry-run : Solo muestra cuántos se purgarían}';
++
++    protected $description = 'Elimina los archivos de documentos de verificación vencidos según la política de retención.';
++
++    public function handle(AlmacenFotos $almacen): int
++    {
++        $limite = now()->subDays((int) config('marketplace.verificacion.retencion_dias'));
++
++        $consulta = DocumentosVerificacion::query()
++            ->whereNull('purgado_at')
++            ->whereIn('estado', ['valido', 'rechazado'])
++            ->where('updated_at', '<', $limite)
++            ->whereHas('perfil', fn ($q) => $q->whereIn('estado_verificacion', [
++                PerfilPrestador::ESTADO_VERIFICADO,
++                PerfilPrestador::ESTADO_RECHAZADO,
++            ]));
++
++        if ($this->option('dry-run')) {
++            $this->info("Se purgarían {$consulta->count()} documento(s).");
++
++            return self::SUCCESS;
++        }
++
++        $total = 0;
++
++        $consulta->chunkById(100, function ($documentos) use ($almacen, &$total) {
++            foreach ($documentos as $doc) {
++                $ruta = $doc->ruta_cifrada;
++
++                DB::transaction(function () use ($doc) {
++                    $doc->update(['ruta_cifrada' => '', 'purgado_at' => now()]);
++
++                    Auditoria::registrar('documento.purgado', 'perfil_prestador', $doc->perfil_id, null, [
++                        'documento_id' => $doc->id,
++                        'tipo'         => $doc->tipo,
++                    ]);
++                });
++
++                $almacen->borrar($almacen->discoPrivado(), $ruta !== '' ? $ruta : null);
++                $total++;
++            }
++        });
++
++        $this->info("Documentos purgados: {$total}.");
++
++        return self::SUCCESS;
++    }
++}
+diff --git a/app/Http/Controllers/Admin/DocumentoVerificacionController.php b/app/Http/Controllers/Admin/DocumentoVerificacionController.php
+new file mode 100644
+index 0000000..abb98de
+--- /dev/null
++++ b/app/Http/Controllers/Admin/DocumentoVerificacionController.php
+@@ -0,0 +1,118 @@
++<?php
++
++namespace App\Http\Controllers\Admin;
++
++use App\Http\Controllers\Controller;
++use App\Models\DocumentosVerificacion;
++use App\Models\PerfilPrestador;
++use App\Services\AlmacenFotos;
++use App\Support\Auditoria;
++use Illuminate\Http\RedirectResponse;
++use Illuminate\Http\Request;
++use Illuminate\Http\Response;
++use Illuminate\Support\Facades\DB;
++
++/**
++ * Revisión de documentos de identidad (RF-07, RF-49).
++ *
++ * Para ver un documento el revisor declara primero el MOTIVO (queda en auditoría) y recibe
++ * una autorización temporal sobre ESE perfil. Cada lectura posterior también se registra.
++ */
++class DocumentoVerificacionController extends Controller
++{
++    private function llave(int $perfilId): string
++    {
++        return "acceso_documentos.{$perfilId}";
++    }
++
++    /** Autorización temporal vigente para este perfil → ['motivo' => ..., 'hasta' => timestamp] o null. */
++    public static function accesoVigente(Request $request, int $perfilId): ?array
++    {
++        $acceso = $request->session()->get("acceso_documentos.{$perfilId}");
++
++        return is_array($acceso) && ($acceso['hasta'] ?? 0) > now()->timestamp ? $acceso : null;
++    }
++
++    public function acceso(Request $request, PerfilPrestador $perfil): RedirectResponse
++    {
++        $validated = $request->validate([
++            'motivo' => ['required', 'string', 'min:5', 'max:200'],
++        ], [
++            'motivo.required' => 'Indica el motivo por el que revisarás los documentos.',
++            'motivo.min'      => 'Describe el motivo con al menos 5 caracteres.',
++        ]);
++
++        $minutos = (int) config('marketplace.verificacion.minutos_acceso_revisor');
++
++        Auditoria::registrar('documentos.acceso_autorizado', 'perfil_prestador', $perfil->id, null, [
++            'motivo'  => $validated['motivo'],
++            'minutos' => $minutos,
++        ]);
++
++        $request->session()->put($this->llave($perfil->id), [
++            'motivo' => $validated['motivo'],
++            'hasta'  => now()->addMinutes($minutos)->timestamp,
++        ]);
++
++        return redirect()->back();
++    }
++
++    public function ver(Request $request, AlmacenFotos $almacen, DocumentosVerificacion $documento): Response
++    {
++        $acceso = self::accesoVigente($request, $documento->perfil_id);
++
++        abort_if($acceso === null, 403, 'Declara el motivo de la revisión para ver los documentos.');
++        abort_if($documento->purgado_at !== null || $documento->ruta_cifrada === '', 410, 'Documento eliminado por política de retención.');
++
++        try {
++            $bytes = $almacen->leerCifrado($almacen->discoPrivado(), $documento->ruta_cifrada, $documento->hash_sha256);
++        } catch (\RuntimeException $e) {
++            report($e);
++            abort(404);
++        }
++
++        // RF-49: cada visualización queda registrada con su motivo.
++        Auditoria::registrar('documento.consultado', 'perfil_prestador', $documento->perfil_id, null, [
++            'documento_id' => $documento->id,
++            'tipo'         => $documento->tipo,
++            'motivo'       => $acceso['motivo'],
++        ]);
++
++        return response($bytes, 200, [
++            'Content-Type'           => 'image/webp',
++            'Content-Disposition'    => 'inline; filename="documento.webp"',
++            'Cache-Control'          => 'no-store, private',
++            'X-Content-Type-Options' => 'nosniff',
++        ]);
++    }
++
++    /** Marca un documento como válido o rechazado (con motivo). */
++    public function revisar(Request $request, DocumentosVerificacion $documento): RedirectResponse
++    {
++        $validated = $request->validate([
++            'estado' => ['required', 'in:valido,rechazado'],
++            'motivo' => ['required_if:estado,rechazado', 'nullable', 'string', 'min:5', 'max:255'],
++        ], [
++            'motivo.required_if' => 'Indica por qué rechazas este documento (el prestador lo verá).',
++        ]);
++
++        abort_if($documento->purgado_at !== null, 410);
++
++        DB::transaction(function () use ($documento, $validated, $request) {
++            $anterior = $documento->estado;
++
++            $documento->update([
++                'estado'       => $validated['estado'],
++                'motivo'       => $validated['estado'] === 'rechazado' ? $validated['motivo'] : null,
++                'revisado_por' => $request->user()->id,
++            ]);
++
++            Auditoria::registrar('documento.revisado', 'perfil_prestador', $documento->perfil_id,
++                ['estado' => $anterior],
++                ['documento_id' => $documento->id, 'tipo' => $documento->tipo, 'estado' => $documento->estado],
++            );
++        });
++
++        return redirect()->back()->with('success', 'Documento actualizado.');
++    }
++}
+diff --git a/app/Http/Controllers/Admin/VerificacionPrestadorController.php b/app/Http/Controllers/Admin/VerificacionPrestadorController.php
+index db2caeb..4ecf6f8 100644
+--- a/app/Http/Controllers/Admin/VerificacionPrestadorController.php
++++ b/app/Http/Controllers/Admin/VerificacionPrestadorController.php
+@@ -50,7 +50,7 @@ public function index(Request $request): Response
+      * Nunca se envía latitud/longitud: solo la ubicación aproximada en texto
+      * y el radio de cobertura (misma regla que en el perfil público).
+      */
+-    public function show(PerfilPrestador $perfil): Response
++    public function show(Request $request, PerfilPrestador $perfil): Response
+     {
+         $perfil->load([
+             'user:id,nombre,email',
+@@ -85,6 +85,8 @@ public function show(PerfilPrestador $perfil): Response
+                 'ubicacion_aproximada' => $perfil->ubicacion_aproximada,
+                 'radio_cobertura_km'   => $perfil->radio_cobertura_km,
+                 'estado_verificacion'  => $perfil->estado_verificacion,
++                'en_revision'          => $perfil->enRevision(),
++                'motivo_rechazo'       => $perfil->motivo_rechazo,
+                 'created_at'           => $perfil->created_at,
+             ],
+             'usuario' => [
+@@ -104,6 +106,21 @@ public function show(PerfilPrestador $perfil): Response
+                 'promedio' => $resenas?->promedio !== null ? round((float) $resenas->promedio, 1) : null,
+                 'total'    => (int) ($resenas?->total ?? 0),
+             ],
++            // RF-07: documentos para revisar. Nunca viaja la ruta; se leen por admin.documentos.ver.
++            'documentos' => $perfil->documentos()->orderBy('tipo')->get()->map(fn ($d) => [
++                'id'          => $d->id,
++                'tipo'        => $d->tipo,
++                'estado'      => $d->estado,
++                'motivo'      => $d->motivo,
++                'purgado'     => $d->purgado_at !== null,
++                'actualizado' => $d->updated_at,
++            ])->values(),
++            'tiposRequeridos' => config('marketplace.verificacion.tipos_requeridos'),
++            'acceso' => (function () use ($request, $perfil) {
++                $acceso = DocumentoVerificacionController::accesoVigente($request, $perfil->id);
++
++                return ['activo' => $acceso !== null, 'motivo' => $acceso['motivo'] ?? null, 'hasta' => $acceso['hasta'] ?? null];
++            })(),
+         ]);
+     }
+ 
+@@ -114,6 +131,14 @@ public function updateStatus(Request $request, PerfilPrestador $perfil): Redirec
+     {
+         $request->validate([
+             'estado' => ['required', 'string', Rule::in(['aprobado', 'verificado', 'rechazado', 'pendiente'])],
++            // RF-06: un rechazo siempre lleva motivo, y el prestador lo ve.
++            'motivo' => [
++                Rule::requiredIf(fn () => $request->input('estado') === 'rechazado'),
++                'nullable', 'string', 'min:10', 'max:500',
++            ],
++        ], [
++            'motivo.required' => 'Indica el motivo del rechazo: el prestador lo verá para corregirlo.',
++            'motivo.min'      => 'Explica el motivo con al menos 10 caracteres.',
+         ]);
+ 
+         // Mapeo defensivo: el frontend envía 'aprobado', pero la BD MySQL espera 'verificado'
+@@ -129,21 +154,48 @@ public function updateStatus(Request $request, PerfilPrestador $perfil): Redirec
+             return redirect()->back()->with('error', 'Estado de verificación no válido.');
+         }
+ 
++        // RF-05/08: no se aprueba a quien no entregó (o tiene rechazados) INE y comprobante.
++        if ($nuevoEstado === 'verificado' && config('marketplace.verificacion.exigir_documentos')) {
++            $docs = $perfil->documentos()->get()->keyBy('tipo');
++
++            foreach (config('marketplace.verificacion.tipos_requeridos') as $tipo) {
++                $d = $docs->get($tipo);
++
++                if (! $d || $d->estado === 'rechazado') {
++                    return redirect()->back()->with('error', 'No se puede aprobar: faltan documentos de identidad o hay alguno rechazado.');
++                }
++            }
++        }
++
+         // Actualizar ÚNICAMENTE la columna que existe en la BD
+         // RF-52: el cambio y su rastro van juntos o no van.
+-        DB::transaction(function () use ($perfil, $nuevoEstado) {
++        DB::transaction(function () use ($perfil, $nuevoEstado, $request) {
+             $anterior = $perfil->estado_verificacion;
+ 
+-            $perfil->update([
+-                'estado_verificacion' => $nuevoEstado,
+-            ]);
++            $cambios = ['estado_verificacion' => $nuevoEstado];
++
++            if ($nuevoEstado === 'rechazado') {
++                $cambios['motivo_rechazo'] = $request->input('motivo');
++            } elseif ($nuevoEstado === 'verificado') {
++                $cambios['motivo_rechazo'] = null;
++            }
++
++            $perfil->update($cambios);
++
++            if ($nuevoEstado === 'verificado') {
++                // Al aprobar al prestador, los documentos pendientes quedan como válidos.
++                $perfil->documentos()->where('estado', 'pendiente')->update([
++                    'estado'       => 'valido',
++                    'revisado_por' => $request->user()->id,
++                ]);
++            }
+ 
+             Auditoria::registrar(
+                 'prestador.verificacion_cambiada',
+                 'perfil_prestador',
+                 $perfil->id,
+                 ['estado_verificacion' => $anterior],
+-                ['estado_verificacion' => $nuevoEstado],
++                ['estado_verificacion' => $nuevoEstado, 'motivo' => $request->input('motivo')],
+             );
+         });
+ 
+diff --git a/app/Http/Controllers/VerificacionDocumentosController.php b/app/Http/Controllers/VerificacionDocumentosController.php
+new file mode 100644
+index 0000000..e9a3958
+--- /dev/null
++++ b/app/Http/Controllers/VerificacionDocumentosController.php
+@@ -0,0 +1,221 @@
++<?php
++
++namespace App\Http\Controllers;
++
++use App\Models\DocumentosVerificacion;
++use App\Models\PerfilPrestador;
++use App\Services\AlmacenFotos;
++use App\Support\Auditoria;
++use Illuminate\Http\RedirectResponse;
++use Illuminate\Http\Request;
++use Illuminate\Http\Response;
++use Illuminate\Support\Facades\DB;
++use Illuminate\Validation\ValidationException;
++use Inertia\Inertia;
++use Inertia\Response as InertiaResponse;
++
++/**
++ * Verificación de identidad del prestador (RF-05, RF-06): INE (frente y reverso) y
++ * comprobante de domicilio. Los archivos se guardan cifrados en el disco privado.
++ */
++class VerificacionDocumentosController extends Controller
++{
++    private function perfil(Request $request): PerfilPrestador
++    {
++        return PerfilPrestador::firstOrCreate(
++            ['user_id' => $request->user()->id],
++            ['estado_verificacion' => PerfilPrestador::ESTADO_PENDIENTE],
++        );
++    }
++
++    private function requeridos(): array
++    {
++        return (array) config('marketplace.verificacion.tipos_requeridos');
++    }
++
++    public function show(Request $request): InertiaResponse
++    {
++        $perfil = $this->perfil($request);
++
++        $docs = $perfil->documentos()->get()->keyBy('tipo');
++
++        $documentos = collect($this->requeridos())->map(function (string $tipo) use ($docs) {
++            /** @var DocumentosVerificacion|null $d */
++            $d = $docs->get($tipo);
++
++            return [
++                'tipo'      => $tipo,
++                'id'        => $d?->id,
++                'estado'    => $d?->estado,        // pendiente | valido | rechazado | null (sin subir)
++                'motivo'    => $d?->motivo,
++                'purgado'   => $d?->purgado_at !== null,
++                'subido_en' => $d?->updated_at,
++            ];
++        })->values();
++
++        $completo = $documentos->every(fn ($d) => $d['id'] !== null && ! $d['purgado'] && $d['estado'] !== 'rechazado');
++
++        return Inertia::render('Prestador/Verificacion', [
++            'estado'           => $perfil->estadoVisible(),
++            'motivoRechazo'    => $perfil->estado_verificacion === PerfilPrestador::ESTADO_RECHAZADO ? $perfil->motivo_rechazo : null,
++            'puedeEditar'      => $perfil->puedeEditarDocumentos(),
++            'documentos'       => $documentos,
++            'completo'         => $completo,
++            'enviadaEn'        => $perfil->verificacion_enviada_at,
++            'retencionDias'    => (int) config('marketplace.verificacion.retencion_dias'),
++        ]);
++    }
++
++    public function store(Request $request, AlmacenFotos $almacen): RedirectResponse
++    {
++        $perfil = $this->perfil($request);
++
++        $request->validate([
++            'tipo' => ['required', 'string', 'in:'.implode(',', $this->requeridos())],
++            'foto' => ['required', 'file', 'mimes:jpg,jpeg,png,webp', 'max:'.config('marketplace.fotos.max_kb')],
++        ]);
++
++        if (! $perfil->puedeEditarDocumentos()) {
++            throw ValidationException::withMessages([
++                'foto' => 'Tu solicitud ya está en revisión o fue aprobada: no se pueden cambiar documentos.',
++            ]);
++        }
++
++        $tipo = $request->input('tipo');
++
++        $datos = $almacen->guardarCifrado(
++            $request->file('foto'),
++            $almacen->discoPrivado(),
++            "verificacion/{$perfil->id}",
++            (int) config('marketplace.verificacion.lado_max'),
++        );
++
++        $rutaAnterior = null;
++
++        try {
++            DB::transaction(function () use ($perfil, $tipo, $datos, &$rutaAnterior) {
++                $anterior = $perfil->documentos()->where('tipo', $tipo)->first();
++                $rutaAnterior = $anterior && $anterior->ruta_cifrada !== '' ? $anterior->ruta_cifrada : null;
++
++                $anterior?->delete();
++
++                $doc = DocumentosVerificacion::create([
++                    'perfil_id'    => $perfil->id,
++                    'tipo'         => $tipo,
++                    'ruta_cifrada' => $datos['ruta'],
++                    'hash_sha256'  => $datos['hash_sha256'],
++                    'estado'       => 'pendiente',
++                ]);
++
++                Auditoria::registrar('verificacion.documento_subido', 'perfil_prestador', $perfil->id, null, [
++                    'documento_id' => $doc->id,
++                    'tipo'         => $tipo,
++                ]);
++            });
++        } catch (\Throwable $e) {
++            $almacen->borrar($almacen->discoPrivado(), $datos['ruta']);
++
++            throw $e;
++        }
++
++        $almacen->borrar($almacen->discoPrivado(), $rutaAnterior);
++
++        return redirect()->back()->with('success', 'Documento guardado de forma segura.');
++    }
++
++    /** El prestador puede ver sus propios documentos para comprobar que se leen bien. */
++    public function ver(Request $request, AlmacenFotos $almacen, DocumentosVerificacion $documento): Response
++    {
++        $perfil = $this->perfil($request);
++
++        abort_unless($documento->perfil_id === $perfil->id, 403);
++        abort_if($documento->purgado_at !== null || $documento->ruta_cifrada === '', 410, 'Documento eliminado por política de retención.');
++
++        try {
++            $bytes = $almacen->leerCifrado($almacen->discoPrivado(), $documento->ruta_cifrada, $documento->hash_sha256);
++        } catch (\RuntimeException $e) {
++            report($e);
++            abort(404);
++        }
++
++        return response($bytes, 200, [
++            'Content-Type'           => 'image/webp',
++            'Content-Disposition'    => 'inline; filename="documento.webp"',
++            'Cache-Control'          => 'no-store, private',
++            'X-Content-Type-Options' => 'nosniff',
++        ]);
++    }
++
++    public function destroy(Request $request, AlmacenFotos $almacen, DocumentosVerificacion $documento): RedirectResponse
++    {
++        $perfil = $this->perfil($request);
++
++        abort_unless($documento->perfil_id === $perfil->id, 403);
++
++        if (! $perfil->puedeEditarDocumentos()) {
++            throw ValidationException::withMessages([
++                'foto' => 'Tu solicitud ya está en revisión o fue aprobada: no se pueden eliminar documentos.',
++            ]);
++        }
++
++        $ruta = $documento->ruta_cifrada !== '' ? $documento->ruta_cifrada : null;
++
++        DB::transaction(function () use ($perfil, $documento) {
++            Auditoria::registrar('verificacion.documento_eliminado', 'perfil_prestador', $perfil->id, null, [
++                'documento_id' => $documento->id,
++                'tipo'         => $documento->tipo,
++            ]);
++
++            $documento->delete();
++        });
++
++        $almacen->borrar($almacen->discoPrivado(), $ruta);
++
++        return redirect()->back()->with('success', 'Documento eliminado.');
++    }
++
++    /** Envía la solicitud a revisión (RF-06). Exige el aviso de privacidad aceptado. */
++    public function enviar(Request $request): RedirectResponse
++    {
++        $perfil = $this->perfil($request);
++
++        $request->validate([
++            'acepta_aviso' => ['accepted'],
++        ], [
++            'acepta_aviso.accepted' => 'Debes aceptar el aviso de privacidad para enviar tus documentos.',
++        ]);
++
++        if (! $perfil->puedeEditarDocumentos()) {
++            throw ValidationException::withMessages(['acepta_aviso' => 'Tu solicitud ya fue enviada.']);
++        }
++
++        $docs = $perfil->documentos()->get()->keyBy('tipo');
++
++        foreach ($this->requeridos() as $tipo) {
++            $d = $docs->get($tipo);
++
++            if (! $d || $d->purgado_at !== null || $d->estado === 'rechazado') {
++                throw ValidationException::withMessages([
++                    'acepta_aviso' => 'Falta subir (o volver a subir) todos los documentos requeridos.',
++                ]);
++            }
++        }
++
++        DB::transaction(function () use ($perfil) {
++            $anterior = $perfil->estado_verificacion;
++
++            $perfil->update([
++                'estado_verificacion'     => PerfilPrestador::ESTADO_PENDIENTE,
++                'verificacion_enviada_at' => now(),
++                'motivo_rechazo'          => null,
++            ]);
++
++            Auditoria::registrar('prestador.verificacion_enviada', 'perfil_prestador', $perfil->id,
++                ['estado_verificacion' => $anterior],
++                ['estado_verificacion' => PerfilPrestador::ESTADO_PENDIENTE, 'aviso_privacidad_aceptado' => true],
++            );
++        });
++
++        return redirect()->back()->with('success', 'Documentos enviados. Te avisaremos cuando terminemos la revisión.');
++    }
++}
+diff --git a/app/Models/DocumentosVerificacion.php b/app/Models/DocumentosVerificacion.php
+index df323aa..ee1e01d 100644
+--- a/app/Models/DocumentosVerificacion.php
++++ b/app/Models/DocumentosVerificacion.php
+@@ -37,9 +37,12 @@ class DocumentosVerificacion extends Model
+         'estado',
+         'revisado_por',
+         'vence_en',
++        'motivo',
++        'purgado_at',
+     ];
+ 
+     protected $casts = [
++        'purgado_at'   => 'datetime',
+         'perfil_id'    => 'integer',
+         'revisado_por' => 'integer',
+         'vence_en'     => 'date',
+diff --git a/app/Models/PerfilPrestador.php b/app/Models/PerfilPrestador.php
+index 069b7ce..017eb1f 100644
+--- a/app/Models/PerfilPrestador.php
++++ b/app/Models/PerfilPrestador.php
+@@ -56,6 +56,7 @@ class PerfilPrestador extends Model
+         'radio_cobertura_km',
+         'estado_verificacion',
+         'motivo_rechazo',
++        'verificacion_enviada_at',
+     ];
+ 
+     protected $casts = [
+@@ -64,6 +65,7 @@ class PerfilPrestador extends Model
+         'latitud'            => 'float',
+         'longitud'           => 'float',
+         'radio_cobertura_km' => 'integer',
++        'verificacion_enviada_at' => 'datetime',
+     ];
+ 
+     public function estaVerificado(): bool
+@@ -71,6 +73,26 @@ public function estaVerificado(): bool
+         return $this->estado_verificacion === self::ESTADO_VERIFICADO;
+     }
+ 
++    /** RF-06: "en revisión" = envió sus documentos y aún no hay decisión. */
++    public function enRevision(): bool
++    {
++        return $this->estado_verificacion === self::ESTADO_PENDIENTE
++            && $this->verificacion_enviada_at !== null;
++    }
++
++    /** Estado que ve el prestador: pendiente | en_revision | verificado | rechazado. */
++    public function estadoVisible(): string
++    {
++        return $this->enRevision() ? 'en_revision' : (string) $this->estado_verificacion;
++    }
++
++    /** Solo se pueden cambiar documentos antes de enviar o tras un rechazo. */
++    public function puedeEditarDocumentos(): bool
++    {
++        return $this->estado_verificacion === self::ESTADO_RECHAZADO
++            || ($this->estado_verificacion === self::ESTADO_PENDIENTE && $this->verificacion_enviada_at === null);
++    }
++
+     public function tieneUbicacion(): bool
+     {
+         return $this->latitud !== null && $this->longitud !== null;
+diff --git a/app/Notifications/EstadoVerificacionNotification.php b/app/Notifications/EstadoVerificacionNotification.php
+index 2000f53..06c6e73 100644
+--- a/app/Notifications/EstadoVerificacionNotification.php
++++ b/app/Notifications/EstadoVerificacionNotification.php
+@@ -35,7 +35,7 @@ public function toArray(object $notifiable): array
+         // Mapeo adaptado al ENUM físico de MySQL ('verificado', 'rechazado', 'pendiente')
+         $mensaje = match ($estado) {
+             'verificado', 'aprobado' => '¡Felicidades! Tu perfil de prestador ha sido verificado. Ya puedes ofrecer tus servicios en la plataforma.',
+-            'rechazado'             => 'Lamentablemente tu solicitud de verificación de prestador ha sido rechazada.',
++            'rechazado'             => 'Tu solicitud de verificación fue rechazada.'.($this->perfil->motivo_rechazo ? ' Motivo: '.$this->perfil->motivo_rechazo : '').' Corrige tus documentos y vuelve a enviarlos.',
+             default                 => 'El estado de tu solicitud de verificación ha cambiado a: ' . $estado,
+         };
+ 
+diff --git a/app/Services/AlmacenFotos.php b/app/Services/AlmacenFotos.php
+index 0d676aa..766fa40 100644
+--- a/app/Services/AlmacenFotos.php
++++ b/app/Services/AlmacenFotos.php
+@@ -3,7 +3,9 @@
+ namespace App\Services;
+ 
+ use App\Support\Imagenes\ProcesadorImagen;
++use Illuminate\Contracts\Encryption\DecryptException;
+ use Illuminate\Http\UploadedFile;
++use Illuminate\Support\Facades\Crypt;
+ use Illuminate\Support\Facades\Storage;
+ use Illuminate\Support\Str;
+ use Illuminate\Validation\ValidationException;
+@@ -77,6 +79,63 @@ public function guardar(UploadedFile $archivo, string $disco, string $carpeta):
+         return ['ruta' => $ruta, 'hash_sha256' => $imagen->hash];
+     }
+ 
++    /**
++     * Documentos de identidad: se re-codifican (sin EXIF/GPS) y se guardan CIFRADOS con la
++     * clave de la aplicación (AES-256 vía Crypt). Aunque alguien lea el bucket, solo ve bytes
++     * ilegibles. No hay miniatura ni URL: solo se leen con leerCifrado() tras autorizar.
++     *
++     * @return array{ruta: string, hash_sha256: string}
++     *
++     * @throws ValidationException con el error en el campo "foto"
++     */
++    public function guardarCifrado(UploadedFile $archivo, string $disco, string $carpeta, int $ladoMax): array
++    {
++        try {
++            $imagen = $this->procesador->procesar($archivo, $ladoMax, 64);
++        } catch (InvalidArgumentException $e) {
++            throw ValidationException::withMessages(['foto' => $e->getMessage()]);
++        }
++
++        $ruta = trim($carpeta, '/').'/'.Str::lower((string) Str::ulid()).'.enc';
++
++        try {
++            Storage::disk($disco)->put($ruta, Crypt::encryptString($imagen->principal));
++        } catch (Throwable $e) {
++            report($e);
++
++            throw ValidationException::withMessages([
++                'foto' => 'No pudimos guardar el documento. Intenta de nuevo en un momento.',
++            ]);
++        }
++
++        return ['ruta' => $ruta, 'hash_sha256' => $imagen->hash];
++    }
++
++    /**
++     * Devuelve los bytes (WebP) de un documento cifrado y verifica su integridad.
++     * Lanza RuntimeException si falta el archivo, no se puede descifrar o el hash no coincide.
++     */
++    public function leerCifrado(string $disco, string $ruta, string $hashEsperado): string
++    {
++        $cifrado = Storage::disk($disco)->get($ruta);
++
++        if (! is_string($cifrado) || $cifrado === '') {
++            throw new \RuntimeException('El documento no existe en el almacenamiento.');
++        }
++
++        try {
++            $bytes = Crypt::decryptString($cifrado);
++        } catch (DecryptException) {
++            throw new \RuntimeException('No se pudo descifrar el documento.');
++        }
++
++        if (! hash_equals($hashEsperado, hash('sha256', $bytes))) {
++            throw new \RuntimeException('El documento no coincide con su huella de integridad.');
++        }
++
++        return $bytes;
++    }
++
+     /** Borra la imagen y su miniatura. Un fallo del almacenamiento se reporta pero no rompe la petición. */
+     public function borrar(string $disco, string|array|null $rutas): void
+     {
+diff --git a/config/marketplace.php b/config/marketplace.php
+index e1e1dab..08eea23 100644
+--- a/config/marketplace.php
++++ b/config/marketplace.php
+@@ -33,6 +33,15 @@
+         'minutos_url_privada'      => 5,
+     ],
+ 
++    // Verificación de identidad (RF-05 a RF-08). Los documentos van cifrados en el disco privado.
++    'verificacion' => [
++        'tipos_requeridos'       => ['ine_frente', 'ine_reverso', 'comprobante_domicilio'],
++        'lado_max'               => 2000,   // px: la INE debe seguir legible
++        'exigir_documentos'      => (bool) env('VERIFICACION_EXIGIR_DOCUMENTOS', true),
++        'retencion_dias'         => (int) env('VERIFICACION_RETENCION_DIAS', 180),
++        'minutos_acceso_revisor' => 15,
++    ],
++
+     // Interruptores de módulos (ver TransicionesPedido::mapa()).
+     'cotizaciones_habilitadas' => (bool) env('MARKETPLACE_COTIZACIONES', false),
+     'escrow_habilitado'        => (bool) env('MARKETPLACE_ESCROW', false),
+diff --git a/database/migrations/2026_11_17_000001_add_campos_verificacion_identidad.php b/database/migrations/2026_11_17_000001_add_campos_verificacion_identidad.php
+new file mode 100644
+index 0000000..66ccdb5
+--- /dev/null
++++ b/database/migrations/2026_11_17_000001_add_campos_verificacion_identidad.php
+@@ -0,0 +1,37 @@
++<?php
++
++use Illuminate\Database\Migrations\Migration;
++use Illuminate\Database\Schema\Blueprint;
++use Illuminate\Support\Facades\Schema;
++
++return new class extends Migration
++{
++    /**
++     * RF-05/06: carga de documentos y estado "en revisión".
++     *
++     * No se toca el ENUM de estado_verificacion (cambiarlo es distinto en MySQL y Postgres):
++     * "en revisión" = pendiente + verificacion_enviada_at con valor.
++     */
++    public function up(): void
++    {
++        Schema::table('perfiles_prestador', function (Blueprint $table) {
++            $table->timestamp('verificacion_enviada_at')->nullable();
++        });
++
++        Schema::table('documentos_verificacion', function (Blueprint $table) {
++            $table->string('motivo', 255)->nullable();      // motivo si el revisor lo rechaza
++            $table->timestamp('purgado_at')->nullable();    // retención: archivo ya eliminado
++        });
++    }
++
++    public function down(): void
++    {
++        Schema::table('documentos_verificacion', function (Blueprint $table) {
++            $table->dropColumn(['motivo', 'purgado_at']);
++        });
++
++        Schema::table('perfiles_prestador', function (Blueprint $table) {
++            $table->dropColumn('verificacion_enviada_at');
++        });
++    }
++};
+diff --git a/docs/VERIFICACION.md b/docs/VERIFICACION.md
+new file mode 100644
+index 0000000..6c131e6
+--- /dev/null
++++ b/docs/VERIFICACION.md
+@@ -0,0 +1,24 @@
++# Verificación de identidad (RF-05 a RF-08)
++
++## Flujo
++1. El prestador abre **Verificación de identidad** (`/prestador/verificacion`) y sube INE (frente y reverso) y comprobante de domicilio.
++2. Acepta el aviso de privacidad y pulsa **Enviar a revisión** → estado visible `en_revision` (internamente `pendiente` + `verificacion_enviada_at`).
++3. El revisor abre el perfil del prestador (`/admin/prestadores/{id}`), declara el **motivo** y ve los documentos. Puede marcar cada uno como válido o rechazado (con motivo).
++4. Aprueba (`verificado`) o rechaza (con motivo, visible para el prestador). Al aprobar, los documentos pendientes pasan a `valido`.
++5. Tras un rechazo, el prestador corrige y vuelve a enviar.
++
++## Seguridad
++- Imágenes re-codificadas (sin EXIF/GPS) y **cifradas con AES-256 (APP_KEY)** antes de guardarse en el disco privado (`.enc`). Nunca hay URL: se leen por la aplicación tras autorizar.
++- Huella sha256 verificada en cada lectura (detecta archivos alterados).
++- Acceso del revisor: motivo obligatorio → autorización de 15 min sobre ese perfil → cada lectura queda en `log_auditoria` (`documento.consultado`).
++- El Service Worker nunca cachea estas rutas; las respuestas llevan `no-store`.
++- Retención: `php artisan verificacion:purgar-documentos` (diario 03:30) elimina el archivo de documentos resueltos tras `VERIFICACION_RETENCION_DIAS` días (180 por defecto) y conserva el registro.
++
++## Importante
++- **No cambies ni pierdas `APP_KEY`**: los documentos cifrados dejarían de poder leerse. Si la rotas, conserva la anterior en `APP_PREVIOUS_KEYS`.
++- `VERIFICACION_EXIGIR_DOCUMENTOS=false` permite aprobar sin documentos (útil solo para demos).
++
++## Pendiente
++- Referencias personales y antecedentes (RF-05) y documentos en PDF.
++- Que el rol `verificador` entre al panel (hoy el panel admite `admin` y `superadmin`).
++- Notificar a los revisores cuando llega una solicitud nueva.
+diff --git a/resources/js/Layouts/AuthenticatedLayout.vue b/resources/js/Layouts/AuthenticatedLayout.vue
+index 51a15ba..2f1fcba 100644
+--- a/resources/js/Layouts/AuthenticatedLayout.vue
++++ b/resources/js/Layouts/AuthenticatedLayout.vue
+@@ -64,6 +64,14 @@ const claseEnlace = (activo) => [
+                 >
+                   Perfil Prestador
+                 </Link>
++
++                <Link
++                  v-if="esPrestador"
++                  :href="route('prestador.verificacion.show')"
++                  :class="claseEnlace(route().current('prestador.verificacion.show'))"
++                >
++                  Verificación
++                </Link>
+               </div>
+             </div>
+ 
+@@ -105,6 +113,10 @@ const claseEnlace = (activo) => [
+                       Perfil de Prestador
+                     </DropdownLink>
+ 
++                    <DropdownLink v-if="esPrestador" :href="route('prestador.verificacion.show')">
++                      Verificación de identidad
++                    </DropdownLink>
++
+                     <DropdownLink :href="route('profile.edit')">
+                       Ajustes de Cuenta
+                     </DropdownLink>
+@@ -204,6 +216,9 @@ const claseEnlace = (activo) => [
+               <ResponsiveNavLink v-if="esPrestador" :href="route('prestador.perfil.edit')" :active="route().current('prestador.perfil.edit')">
+                 Mi Perfil de Prestador / Servicios
+               </ResponsiveNavLink>
++              <ResponsiveNavLink v-if="esPrestador" :href="route('prestador.verificacion.show')" :active="route().current('prestador.verificacion.show')">
++                Verificación de identidad
++              </ResponsiveNavLink>
+               <ResponsiveNavLink :href="route('profile.edit')">
+                 Ajustes de Cuenta
+               </ResponsiveNavLink>
+diff --git a/resources/js/Pages/Admin/Prestadores/Index.vue b/resources/js/Pages/Admin/Prestadores/Index.vue
+index 1dc8d30..952d7ab 100644
+--- a/resources/js/Pages/Admin/Prestadores/Index.vue
++++ b/resources/js/Pages/Admin/Prestadores/Index.vue
+@@ -10,6 +10,8 @@ const props = defineProps({
+ 
+ const prestadorAProcesar = ref(null)
+ const accionVerificacion = ref('')
++const motivoVerificacion = ref('')
++const errorMotivo = ref('')
+ 
+ const filtrar = (estado) => {
+   router.get(route('admin.prestadores.index'), { estado }, { preserveState: true, replace: true })
+@@ -18,6 +20,8 @@ const filtrar = (estado) => {
+ const abrirModal = (prestador, accion) => {
+   prestadorAProcesar.value = prestador
+   accionVerificacion.value = accion
++  motivoVerificacion.value = ''
++  errorMotivo.value = ''
+ }
+ 
+ const procesarVerificacion = () => {
+@@ -25,11 +29,13 @@ const procesarVerificacion = () => {
+ 
+   router.patch(route('admin.prestadores.updateStatus', prestadorAProcesar.value.id), {
+     estado: accionVerificacion.value,
++    motivo: accionVerificacion.value === 'rechazado' ? motivoVerificacion.value : null,
+   }, {
+     preserveScroll: true,
+     onSuccess: () => {
+       prestadorAProcesar.value = null
+     },
++    onError: (e) => (errorMotivo.value = e.motivo || ''),
+   })
+ }
+ 
+@@ -278,6 +284,19 @@ const iconos = {
+               </p>
+             </div>
+ 
++            <div v-if="!esAprobacion" class="text-left space-y-1.5">
++              <label for="motivo-rechazo" class="text-xs font-bold text-principal">Motivo del rechazo (lo verá el prestador)</label>
++              <textarea
++                id="motivo-rechazo"
++                v-model="motivoVerificacion"
++                rows="3"
++                maxlength="500"
++                class="block w-full rounded-xl border-slate-300 focus:border-principal focus:ring-principal text-sm"
++                placeholder="Ej.: La foto de la INE está borrosa; sube una nueva con buena luz."
++              ></textarea>
++              <p v-if="errorMotivo" class="text-xs font-semibold text-red-600" role="alert">{{ errorMotivo }}</p>
++            </div>
++
+             <div class="flex gap-3 pt-2">
+               <button
+                 type="button"
+diff --git a/resources/js/Pages/Admin/Prestadores/Perfil.vue b/resources/js/Pages/Admin/Prestadores/Perfil.vue
+index dfd9bfc..daa5846 100644
+--- a/resources/js/Pages/Admin/Prestadores/Perfil.vue
++++ b/resources/js/Pages/Admin/Prestadores/Perfil.vue
+@@ -10,25 +10,83 @@ const props = defineProps({
+   pedidosPorEstado: { type: Object, default: () => ({}) },
+   totalPedidos: { type: Number, default: 0 },
+   resenas: { type: Object, default: () => ({ promedio: null, total: 0 }) },
++  documentos: { type: Array, default: () => [] },
++  tiposRequeridos: { type: Array, default: () => [] },
++  acceso: { type: Object, default: () => ({ activo: false, motivo: null, hasta: null }) },
+ })
+ 
++/* ---------- Documentos de identidad (RF-07): motivo para ver, y revisión por documento ---------- */
++const ETIQUETA_DOC = {
++  ine_frente: 'INE (frente)',
++  ine_reverso: 'INE (reverso)',
++  comprobante_domicilio: 'Comprobante de domicilio',
++  referencia_personal: 'Referencia personal',
++  antecedentes: 'Antecedentes',
++}
++const motivoAcceso = ref('')
++const errorAcceso = ref('')
++const rechazandoDoc = ref(null)
++const motivoDoc = ref('')
++const errorDoc = ref('')
++
++const autorizarAcceso = () => {
++  errorAcceso.value = ''
++  router.post(route('admin.documentos.acceso', props.perfil.id), { motivo: motivoAcceso.value }, {
++    preserveScroll: true,
++    onSuccess: () => (motivoAcceso.value = ''),
++    onError: (e) => (errorAcceso.value = e.motivo || 'No se pudo autorizar el acceso.'),
++  })
++}
++
++const marcarValido = (doc) =>
++  router.patch(route('admin.documentos.revisar', doc.id), { estado: 'valido' }, { preserveScroll: true })
++
++const confirmarRechazoDoc = (doc) => {
++  errorDoc.value = ''
++  router.patch(route('admin.documentos.revisar', doc.id), { estado: 'rechazado', motivo: motivoDoc.value }, {
++    preserveScroll: true,
++    onSuccess: () => {
++      rechazandoDoc.value = null
++      motivoDoc.value = ''
++    },
++    onError: (e) => (errorDoc.value = e.motivo || 'No se pudo rechazar el documento.'),
++  })
++}
++
++const faltantes = computed(() =>
++  props.tiposRequeridos.filter((t) => !props.documentos.some((d) => d.tipo === t)),
++)
++const horaHasta = computed(() =>
++  props.acceso.hasta ? new Date(props.acceso.hasta * 1000).toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' }) : '',
++)
++const claseEstadoDoc = (e) =>
++  e === 'valido' ? 'bg-green-50 text-green-700 border-green-200'
++    : e === 'rechazado' ? 'bg-red-50 text-red-700 border-red-200'
++      : 'bg-amber-50 text-amber-700 border-amber-200'
++
+ /* ---------- Aprobar / rechazar (misma lógica que la tabla de prestadores) ---------- */
+ const mostrarModal = ref(false)
+ const accionVerificacion = ref('')
++const motivoVerificacion = ref('')
++const errorMotivo = ref('')
+ 
+ const abrirModal = (accion) => {
+   accionVerificacion.value = accion
++  motivoVerificacion.value = ''
++  errorMotivo.value = ''
+   mostrarModal.value = true
+ }
+ 
+ const procesarVerificacion = () => {
+   router.patch(route('admin.prestadores.updateStatus', props.perfil.id), {
+     estado: accionVerificacion.value,
++    motivo: accionVerificacion.value === 'rechazado' ? motivoVerificacion.value : null,
+   }, {
+     preserveScroll: true,
+     onSuccess: () => {
+       mostrarModal.value = false
+     },
++    onError: (e) => (errorMotivo.value = e.motivo || ''),
+   })
+ }
+ 
+@@ -279,6 +337,88 @@ const iconos = {
+             </p>
+           </section>
+ 
++          <!-- Documentos de identidad -->
++          <section class="bg-white rounded-3xl p-6 sm:p-8 border-2 border-slate-200/90 shadow-md space-y-5">
++            <div>
++              <h2 class="font-extrabold text-lg text-principal tracking-tight">Documentos de identidad</h2>
++              <p class="text-xs text-gris-medio mt-0.5">
++                Información de alto riesgo. Para verla debes declarar el motivo; cada consulta queda registrada en la auditoría.
++              </p>
++            </div>
++
++            <p v-if="perfil.motivo_rechazo && estado === 'rechazado'" class="px-3 py-2 rounded-xl bg-red-50 border border-red-200 text-xs text-red-700">
++              <strong>Motivo del rechazo anterior:</strong> {{ perfil.motivo_rechazo }}
++            </p>
++
++            <p v-if="faltantes.length" class="px-3 py-2 rounded-xl bg-amber-50 border border-amber-200 text-xs font-semibold text-amber-800">
++              Faltan: {{ faltantes.map((t) => ETIQUETA_DOC[t] || t).join(', ') }}.
++            </p>
++
++            <p v-if="!documentos.length" class="text-sm text-gris-medio">Este prestador todavía no ha subido documentos.</p>
++
++            <template v-else>
++              <!-- Sin autorización vigente: se pide el motivo -->
++              <div v-if="!acceso.activo" class="space-y-2">
++                <label for="motivo-acceso" class="text-xs font-bold text-principal">Motivo de la revisión</label>
++                <div class="flex flex-col sm:flex-row gap-2">
++                  <input
++                    id="motivo-acceso"
++                    v-model="motivoAcceso"
++                    type="text"
++                    maxlength="200"
++                    placeholder="Ej.: Verificación inicial de identidad"
++                    class="flex-1 rounded-xl border-slate-300 focus:border-principal focus:ring-principal text-sm"
++                    @keyup.enter="autorizarAcceso"
++                  />
++                  <button type="button" class="px-4 py-2 bg-principal hover:bg-slate-800 text-white text-sm font-bold rounded-xl active:scale-95" @click="autorizarAcceso">
++                    Ver documentos
++                  </button>
++                </div>
++                <p v-if="errorAcceso" class="text-xs font-semibold text-red-600" role="alert">{{ errorAcceso }}</p>
++              </div>
++
++              <p v-else class="text-xs text-gris-medio">
++                Acceso autorizado hasta las <strong class="text-principal">{{ horaHasta }}</strong>
++                · Motivo: <em>{{ acceso.motivo }}</em>
++              </p>
++
++              <ul class="grid grid-cols-1 sm:grid-cols-2 gap-4">
++                <li v-for="d in documentos" :key="d.id" class="rounded-2xl border border-slate-200 overflow-hidden bg-white">
++                  <div class="aspect-[4/3] bg-niebla flex items-center justify-center">
++                    <a v-if="acceso.activo && !d.purgado" :href="route('admin.documentos.ver', d.id)" target="_blank" rel="noopener" class="block w-full h-full">
++                      <img :src="route('admin.documentos.ver', d.id)" :alt="ETIQUETA_DOC[d.tipo] || d.tipo" class="w-full h-full object-contain" />
++                    </a>
++                    <span v-else-if="d.purgado" class="text-xs text-gris-medio px-4 text-center">Eliminado por política de retención</span>
++                    <span v-else class="text-xs text-gris-medio px-4 text-center">Declara el motivo para ver el documento</span>
++                  </div>
++
++                  <div class="p-3 space-y-2">
++                    <div class="flex items-center justify-between gap-2">
++                      <span class="text-sm font-bold text-principal">{{ ETIQUETA_DOC[d.tipo] || d.tipo }}</span>
++                      <span class="px-2 py-0.5 rounded-full border text-[10px] font-bold uppercase tracking-wider" :class="claseEstadoDoc(d.estado)">{{ d.estado }}</span>
++                    </div>
++                    <p v-if="d.motivo" class="text-xs text-red-700">Motivo: {{ d.motivo }}</p>
++
++                    <div v-if="!d.purgado && estado !== 'verificado'" class="space-y-2">
++                      <div v-if="rechazandoDoc === d.id" class="space-y-1.5">
++                        <input v-model="motivoDoc" type="text" maxlength="255" placeholder="Motivo (lo verá el prestador)" class="block w-full rounded-lg border-slate-300 text-xs py-1.5 px-2" />
++                        <p v-if="errorDoc" class="text-[11px] font-semibold text-red-600" role="alert">{{ errorDoc }}</p>
++                        <div class="flex gap-2">
++                          <button type="button" class="text-[11px] font-bold text-white bg-red-600 hover:bg-red-700 px-2.5 py-1 rounded-lg" @click="confirmarRechazoDoc(d)">Confirmar rechazo</button>
++                          <button type="button" class="text-[11px] font-bold text-gris-medio" @click="rechazandoDoc = null">Cancelar</button>
++                        </div>
++                      </div>
++                      <div v-else class="flex gap-2">
++                        <button type="button" class="text-[11px] font-bold text-green-700 hover:underline" @click="marcarValido(d)">Marcar válido</button>
++                        <button type="button" class="text-[11px] font-bold text-red-600 hover:underline" @click="rechazandoDoc = d.id; motivoDoc = ''; errorDoc = ''">Rechazar</button>
++                      </div>
++                    </div>
++                  </div>
++                </li>
++              </ul>
++            </template>
++          </section>
++
+           <!-- Servicios publicados -->
+           <section class="bg-white rounded-3xl p-6 sm:p-8 border-2 border-slate-200/90 shadow-md space-y-5">
+             <div class="flex items-center justify-between gap-4">
+@@ -434,6 +574,19 @@ const iconos = {
+               </p>
+             </div>
+ 
++            <div v-if="!esAprobacion" class="text-left space-y-1.5">
++              <label for="motivo-rechazo" class="text-xs font-bold text-principal">Motivo del rechazo (lo verá el prestador)</label>
++              <textarea
++                id="motivo-rechazo"
++                v-model="motivoVerificacion"
++                rows="3"
++                maxlength="500"
++                class="block w-full rounded-xl border-slate-300 focus:border-principal focus:ring-principal text-sm"
++                placeholder="Ej.: La foto de la INE está borrosa; sube una nueva con buena luz."
++              ></textarea>
++              <p v-if="errorMotivo" class="text-xs font-semibold text-red-600" role="alert">{{ errorMotivo }}</p>
++            </div>
++
+             <div class="flex gap-3 pt-2">
+               <button
+                 type="button"
+diff --git a/resources/js/Pages/Prestador/Verificacion.vue b/resources/js/Pages/Prestador/Verificacion.vue
+new file mode 100644
+index 0000000..0d3fa1f
+--- /dev/null
++++ b/resources/js/Pages/Prestador/Verificacion.vue
+@@ -0,0 +1,176 @@
++<script setup>
++import { computed, ref } from 'vue'
++import { Head, router } from '@inertiajs/vue3'
++import AuthenticatedLayout from '@/Layouts/AuthenticatedLayout.vue'
++import SubidorFoto from '@/Components/SubidorFoto.vue'
++
++const props = defineProps({
++  estado: { type: String, default: 'pendiente' }, // pendiente | en_revision | verificado | rechazado
++  motivoRechazo: { type: String, default: null },
++  puedeEditar: { type: Boolean, default: false },
++  documentos: { type: Array, default: () => [] },
++  completo: { type: Boolean, default: false },
++  enviadaEn: { type: String, default: null },
++  retencionDias: { type: Number, default: 180 },
++})
++
++const META = {
++  ine_frente: { titulo: 'INE (frente)', ayuda: 'Foto del frente de tu credencial, sin reflejos, con todos los bordes visibles.' },
++  ine_reverso: { titulo: 'INE (reverso)', ayuda: 'Foto de la parte de atrás, bien enfocada.' },
++  comprobante_domicilio: { titulo: 'Comprobante de domicilio', ayuda: 'Recibo de luz, agua o teléfono reciente (foto o captura de pantalla).' },
++}
++const meta = (tipo) => META[tipo] || { titulo: tipo, ayuda: '' }
++
++const BANNER = {
++  pendiente: { clase: 'bg-amber-50 border-amber-200 text-amber-800', titulo: 'Completa tu verificación', texto: 'Sube los tres documentos y envíalos a revisión para poder publicar servicios.' },
++  en_revision: { clase: 'bg-blue-50 border-blue-200 text-blue-800', titulo: 'Tus documentos están en revisión', texto: 'Te avisaremos cuando terminemos. Mientras tanto no necesitas hacer nada.' },
++  verificado: { clase: 'bg-green-50 border-green-200 text-green-800', titulo: '¡Estás verificado!', texto: 'Tu perfil muestra la insignia de verificado y ya puedes ofrecer servicios.' },
++  rechazado: { clase: 'bg-red-50 border-red-200 text-red-800', titulo: 'Tu solicitud fue rechazada', texto: 'Corrige lo indicado, vuelve a subir los documentos señalados y envíalos de nuevo.' },
++}
++const banner = computed(() => BANNER[props.estado] || BANNER.pendiente)
++
++const ESTADO_DOC = {
++  pendiente: { texto: 'Subido', clase: 'bg-slate-100 text-slate-700 border-slate-200' },
++  valido: { texto: 'Válido', clase: 'bg-green-50 text-green-700 border-green-200' },
++  rechazado: { texto: 'Rechazado', clase: 'bg-red-50 text-red-700 border-red-200' },
++}
++
++const subiendo = ref(null)
++const error = ref('')
++
++const subir = (tipo, archivo) => {
++  subiendo.value = tipo
++  error.value = ''
++  router.post(
++    route('prestador.verificacion.documentos.store'),
++    { tipo, foto: archivo },
++    {
++      forceFormData: true,
++      preserveScroll: true,
++      onError: (e) => (error.value = e.foto || e.tipo || 'No se pudo subir el documento.'),
++      onFinish: () => (subiendo.value = null),
++    },
++  )
++}
++
++const eliminar = (doc) => {
++  if (!confirm('¿Eliminar este documento?')) return
++  router.delete(route('prestador.verificacion.documentos.destroy', doc.id), { preserveScroll: true })
++}
++
++const aceptaAviso = ref(false)
++const enviando = ref(false)
++const errorEnvio = ref('')
++
++const enviar = () => {
++  enviando.value = true
++  errorEnvio.value = ''
++  router.post(
++    route('prestador.verificacion.enviar'),
++    { acepta_aviso: aceptaAviso.value },
++    {
++      preserveScroll: true,
++      onError: (e) => (errorEnvio.value = e.acepta_aviso || 'No se pudo enviar la solicitud.'),
++      onFinish: () => (enviando.value = false),
++    },
++  )
++}
++</script>
++
++<template>
++  <Head title="Verificación de identidad" />
++
++  <AuthenticatedLayout>
++    <div class="py-10 max-w-3xl mx-auto px-4 sm:px-6 lg:px-8 space-y-6">
++
++      <header class="space-y-1">
++        <h1 class="text-2xl font-extrabold text-principal tracking-tight">Verificación de identidad</h1>
++        <p class="text-sm text-gris-medio">
++          Los clientes te dejan entrar a su casa: verificar quién eres es lo que genera esa confianza.
++        </p>
++      </header>
++
++      <section class="rounded-2xl border-2 p-4" :class="banner.clase" role="status">
++        <p class="font-extrabold">{{ banner.titulo }}</p>
++        <p class="text-sm mt-0.5">{{ banner.texto }}</p>
++        <p v-if="estado === 'rechazado' && motivoRechazo" class="text-sm mt-2">
++          <strong>Motivo:</strong> {{ motivoRechazo }}
++        </p>
++      </section>
++
++      <p v-if="error" class="px-3 py-2 rounded-xl bg-red-50 border border-red-200 text-xs font-semibold text-red-700" role="alert">{{ error }}</p>
++
++      <!-- ============ DOCUMENTOS ============ -->
++      <ul class="space-y-4">
++        <li v-for="d in documentos" :key="d.tipo" class="bg-white rounded-3xl border-2 border-slate-200/90 shadow-md p-5 sm:p-6">
++          <div class="flex flex-col sm:flex-row gap-5">
++            <div class="sm:w-48 shrink-0 aspect-[4/3] rounded-2xl bg-niebla border border-slate-200 overflow-hidden flex items-center justify-center">
++              <img
++                v-if="d.id && !d.purgado"
++                :src="route('prestador.verificacion.documentos.ver', d.id)"
++                :alt="meta(d.tipo).titulo"
++                class="w-full h-full object-contain"
++              />
++              <span v-else class="text-xs text-gris-medio px-3 text-center">{{ d.purgado ? 'Eliminado por política de retención' : 'Sin subir' }}</span>
++            </div>
++
++            <div class="flex-1 space-y-2.5">
++              <div class="flex items-center justify-between gap-2">
++                <h2 class="font-extrabold text-principal">{{ meta(d.tipo).titulo }}</h2>
++                <span v-if="d.estado" class="px-2 py-0.5 rounded-full border text-[10px] font-bold uppercase tracking-wider" :class="ESTADO_DOC[d.estado]?.clase">
++                  {{ ESTADO_DOC[d.estado]?.texto }}
++                </span>
++              </div>
++              <p class="text-xs text-gris-medio">{{ meta(d.tipo).ayuda }}</p>
++              <p v-if="d.estado === 'rechazado' && d.motivo" class="text-xs font-semibold text-red-700">Motivo: {{ d.motivo }}</p>
++
++              <div v-if="puedeEditar" class="flex flex-wrap gap-2 pt-1">
++                <SubidorFoto :etiqueta="d.id ? 'Reemplazar' : 'Tomar foto'" :camara="true" :cargando="subiendo === d.tipo" @seleccionada="(f) => subir(d.tipo, f)" />
++                <SubidorFoto etiqueta="Elegir archivo" variante="secundario" :cargando="subiendo === d.tipo" @seleccionada="(f) => subir(d.tipo, f)" />
++                <button v-if="d.id" type="button" class="px-3 py-2 text-xs font-bold text-red-600 hover:underline" @click="eliminar(d)">Eliminar</button>
++              </div>
++            </div>
++          </div>
++        </li>
++      </ul>
++
++      <!-- ============ AVISO DE PRIVACIDAD Y ENVÍO ============ -->
++      <section v-if="puedeEditar" class="bg-white rounded-3xl border-2 border-slate-200/90 shadow-md p-5 sm:p-6 space-y-4">
++        <div class="text-xs text-grafito leading-relaxed space-y-2">
++          <p class="font-extrabold text-principal text-sm">Aviso de privacidad</p>
++          <p>
++            OficiosYa usa tu INE y tu comprobante de domicilio únicamente para verificar tu identidad y dar confianza a los clientes.
++            Se guardan <strong>cifrados</strong>, solo los ve personal autorizado y cada consulta queda registrada.
++          </p>
++          <p>
++            Una vez resuelta la solicitud, los archivos se eliminan automáticamente a los {{ retencionDias }} días.
++            Puedes solicitar acceso, rectificación, cancelación u oposición (derechos ARCO) a tus datos cuando quieras.
++          </p>
++        </div>
++
++        <label class="flex items-start gap-2.5 text-sm text-grafito cursor-pointer">
++          <input v-model="aceptaAviso" type="checkbox" class="mt-0.5 rounded border-slate-300 text-principal focus:ring-principal" />
++          <span>He leído el aviso de privacidad y autorizo el tratamiento de mis documentos para verificar mi identidad.</span>
++        </label>
++
++        <p v-if="errorEnvio" class="text-xs font-semibold text-red-600" role="alert">{{ errorEnvio }}</p>
++
++        <div class="flex flex-wrap items-center gap-3">
++          <button
++            type="button"
++            class="px-5 py-2.5 bg-acento hover:bg-yellow-400 text-principal text-sm font-extrabold rounded-xl shadow-md transition active:scale-95 disabled:opacity-50 disabled:pointer-events-none"
++            :disabled="!completo || !aceptaAviso || enviando"
++            @click="enviar"
++          >
++            {{ enviando ? 'Enviando…' : 'Enviar a revisión' }}
++          </button>
++          <span v-if="!completo" class="text-xs text-gris-medio">Sube los tres documentos para poder enviar.</span>
++        </div>
++      </section>
++
++      <p v-else-if="estado === 'en_revision' && enviadaEn" class="text-xs text-gris-medio">
++        Enviado el {{ new Date(enviadaEn).toLocaleDateString('es-MX') }}. No se pueden cambiar documentos durante la revisión.
++      </p>
++    </div>
++  </AuthenticatedLayout>
++</template>
+diff --git a/resources/js/sw.js b/resources/js/sw.js
+index 87ac166..8352bdd 100644
+--- a/resources/js/sw.js
++++ b/resources/js/sw.js
+@@ -86,10 +86,14 @@ self.addEventListener('notificationclick', (event) => {
+ });
+ 
+ // --- Fotos --------------------------------------------------------------------
+-// Evidencia de pedidos: son fotos privadas del interior de domicilios. NUNCA se guardan
++// Evidencia de pedidos y documentos de identidad (INE, comprobante): NUNCA se guardan
+ // en caché (un celular compartido no debe conservarlas). Va antes de la regla de imágenes.
+ registerRoute(
+-    ({ url }) => url.origin === self.location.origin && url.pathname.startsWith('/evidencias/'),
++    ({ url }) =>
++        url.origin === self.location.origin &&
++        (url.pathname.startsWith('/evidencias/') ||
++            url.pathname.startsWith('/admin/documentos/') ||
++            url.pathname.startsWith('/prestador/verificacion/documentos/')),
+     new NetworkOnly(),
+ );
+ 
+diff --git a/routes/console.php b/routes/console.php
+index afc2964..7be9fde 100644
+--- a/routes/console.php
++++ b/routes/console.php
+@@ -14,3 +14,10 @@
+     ->hourly()
+     ->withoutOverlapping()
+     ->onOneServer();
++
++
++// Retención de datos personales: elimina los archivos de INE/comprobantes ya resueltos tras el plazo.
++Schedule::command('verificacion:purgar-documentos')
++    ->dailyAt('03:30')
++    ->withoutOverlapping()
++    ->onOneServer();
+diff --git a/routes/web.php b/routes/web.php
+index 61b74b5..6b62324 100644
+--- a/routes/web.php
++++ b/routes/web.php
+@@ -13,6 +13,8 @@
+ use App\Http\Controllers\PagoRetornoController;
+ use App\Http\Controllers\PagoWebController;
+ use App\Http\Controllers\PerfilPrestadorController;
++use App\Http\Controllers\VerificacionDocumentosController;
++use App\Http\Controllers\Admin\DocumentoVerificacionController;
+ use App\Http\Controllers\PrestadorPublicoController;
+ use App\Http\Controllers\ProfileController;
+ use App\Http\Controllers\PushController;
+@@ -133,6 +135,22 @@
+         Route::get('/prestador/perfil', [PerfilPrestadorController::class, 'edit'])->name('prestador.perfil.edit');
+         Route::post('/prestador/perfil', [PerfilPrestadorController::class, 'update'])->name('prestador.perfil.update');
+ 
++        // Verificación de identidad (RF-05, RF-06): INE y comprobante, cifrados en disco privado
++        Route::get('/prestador/verificacion', [VerificacionDocumentosController::class, 'show'])
++            ->name('prestador.verificacion.show');
++        Route::post('/prestador/verificacion/documentos', [VerificacionDocumentosController::class, 'store'])
++            ->middleware('throttle:20,1')
++            ->name('prestador.verificacion.documentos.store');
++        Route::get('/prestador/verificacion/documentos/{documento}', [VerificacionDocumentosController::class, 'ver'])
++            ->whereNumber('documento')
++            ->name('prestador.verificacion.documentos.ver');
++        Route::delete('/prestador/verificacion/documentos/{documento}', [VerificacionDocumentosController::class, 'destroy'])
++            ->whereNumber('documento')
++            ->name('prestador.verificacion.documentos.destroy');
++        Route::post('/prestador/verificacion/enviar', [VerificacionDocumentosController::class, 'enviar'])
++            ->middleware('throttle:5,1')
++            ->name('prestador.verificacion.enviar');
++
+         Route::post('/servicios', [ServicioController::class, 'store'])->name('servicios.store');
+         Route::patch('/servicios/{servicio}/toggle', [ServicioController::class, 'toggleState'])->name('servicios.toggle');
+ 
+@@ -166,6 +184,18 @@
+         Route::get('/prestadores/{perfil}', [VerificacionPrestadorController::class, 'show'])->name('prestadores.show');
+         Route::patch('/prestadores/{perfil}/estado', [VerificacionPrestadorController::class, 'updateStatus'])->name('prestadores.updateStatus');
+ 
++        // Revisión de documentos (RF-07, RF-49): motivo obligatorio y cada lectura auditada
++        Route::post('/prestadores/{perfil}/documentos/acceso', [DocumentoVerificacionController::class, 'acceso'])
++            ->whereNumber('perfil')
++            ->middleware('throttle:30,1')
++            ->name('documentos.acceso');
++        Route::get('/documentos/{documento}', [DocumentoVerificacionController::class, 'ver'])
++            ->whereNumber('documento')
++            ->name('documentos.ver');
++        Route::patch('/documentos/{documento}', [DocumentoVerificacionController::class, 'revisar'])
++            ->whereNumber('documento')
++            ->name('documentos.revisar');
++
+         // CRUDs de Gestión
+         Route::resource('categorias', CategoriaController::class)->except(['show', 'create', 'edit']);
+         Route::resource('usuarios', UsuarioAdminController::class)->except(['show', 'create', 'edit']);
+diff --git a/tests/Feature/VerificacionDocumentosTest.php b/tests/Feature/VerificacionDocumentosTest.php
+new file mode 100644
+index 0000000..28effd4
+--- /dev/null
++++ b/tests/Feature/VerificacionDocumentosTest.php
+@@ -0,0 +1,372 @@
++<?php
++
++namespace Tests\Feature;
++
++use App\Models\DocumentosVerificacion;
++use App\Models\PerfilPrestador;
++use App\Models\User;
++use Illuminate\Foundation\Testing\RefreshDatabase;
++use Illuminate\Http\UploadedFile;
++use Illuminate\Support\Facades\Storage;
++use Spatie\Permission\Models\Role;
++use Spatie\Permission\PermissionRegistrar;
++use Tests\TestCase;
++
++/**
++ * Verificación de identidad (RF-05 a RF-08): INE y comprobante cifrados en disco privado,
++ * revisión con motivo obligatorio y auditoría de cada consulta. Usan un disco falso.
++ */
++class VerificacionDocumentosTest extends TestCase
++{
++    use RefreshDatabase;
++
++    private const TIPOS = ['ine_frente', 'ine_reverso', 'comprobante_domicilio'];
++
++    protected function setUp(): void
++    {
++        parent::setUp();
++
++        app(PermissionRegistrar::class)->forgetCachedPermissions();
++        foreach (['cliente', 'prestador', 'admin', 'superadmin', 'verificador'] as $rol) {
++            Role::firstOrCreate(['name' => $rol, 'guard_name' => 'web']);
++        }
++
++        Storage::fake('local');
++    }
++
++    private function prestador(): array
++    {
++        $user = User::factory()->create();
++        $user->assignRole('prestador');
++        $perfil = PerfilPrestador::create(['user_id' => $user->id, 'estado_verificacion' => 'pendiente']);
++
++        return [$user, $perfil];
++    }
++
++    private function admin(): User
++    {
++        $admin = User::factory()->create();
++        $admin->assignRole('admin');
++
++        return $admin;
++    }
++
++    private function foto(): UploadedFile
++    {
++        return UploadedFile::fake()->image('ine.jpg', 900, 600);
++    }
++
++    private function subir(User $user, string $tipo)
++    {
++        return $this->actingAs($user)->post(route('prestador.verificacion.documentos.store'), [
++            'tipo' => $tipo,
++            'foto' => $this->foto(),
++        ]);
++    }
++
++    private function subirTodos(User $user): void
++    {
++        foreach (self::TIPOS as $tipo) {
++            $this->subir($user, $tipo)->assertSessionHasNoErrors();
++        }
++    }
++
++    /* ------------------------------ lado del prestador ------------------------------ */
++
++    public function test_el_documento_se_guarda_cifrado_y_no_como_imagen_legible(): void
++    {
++        [$user, $perfil] = $this->prestador();
++
++        $this->subir($user, 'ine_frente')->assertSessionHasNoErrors();
++
++        $doc = DocumentosVerificacion::firstOrFail();
++        $contenido = Storage::disk('local')->get($doc->ruta_cifrada);
++
++        $this->assertSame('pendiente', $doc->estado);
++        $this->assertStringStartsWith("verificacion/{$perfil->id}/", $doc->ruta_cifrada);
++        $this->assertStringEndsWith('.enc', $doc->ruta_cifrada);
++        // Un WebP legible empezaría por "RIFF": el archivo guardado debe ser ilegible.
++        $this->assertStringNotContainsString('RIFF', substr($contenido, 0, 16));
++        $this->assertStringNotContainsString('WEBP', $contenido);
++    }
++
++    public function test_rechaza_archivos_que_no_son_imagen(): void
++    {
++        [$user] = $this->prestador();
++
++        $falso = UploadedFile::fake()->createWithContent('ine.jpg', '<?php echo 1; ?>');
++
++        $this->actingAs($user)->post(route('prestador.verificacion.documentos.store'), [
++            'tipo' => 'ine_frente',
++            'foto' => $falso,
++        ])->assertSessionHasErrors('foto');
++
++        $this->assertSame(0, DocumentosVerificacion::count());
++    }
++
++    public function test_tipo_de_documento_no_permitido_se_rechaza(): void
++    {
++        [$user] = $this->prestador();
++
++        $this->actingAs($user)->post(route('prestador.verificacion.documentos.store'), [
++            'tipo' => 'antecedentes',
++            'foto' => $this->foto(),
++        ])->assertSessionHasErrors('tipo');
++    }
++
++    public function test_volver_a_subir_reemplaza_el_documento_y_borra_el_archivo_anterior(): void
++    {
++        [$user] = $this->prestador();
++
++        $this->subir($user, 'ine_frente');
++        $primera = DocumentosVerificacion::firstOrFail()->ruta_cifrada;
++
++        $this->subir($user, 'ine_frente');
++
++        $this->assertSame(1, DocumentosVerificacion::count());
++        Storage::disk('local')->assertMissing($primera);
++        Storage::disk('local')->assertExists(DocumentosVerificacion::firstOrFail()->ruta_cifrada);
++    }
++
++    public function test_el_prestador_solo_ve_sus_propios_documentos(): void
++    {
++        [$duenio] = $this->prestador();
++        [$otro] = $this->prestador();
++        $this->subir($duenio, 'ine_frente');
++        $doc = DocumentosVerificacion::firstOrFail();
++
++        $this->actingAs($otro)->get(route('prestador.verificacion.documentos.ver', $doc))->assertForbidden();
++
++        $respuesta = $this->actingAs($duenio)->get(route('prestador.verificacion.documentos.ver', $doc))->assertOk();
++        $this->assertSame('image/webp', $respuesta->headers->get('Content-Type'));
++        $this->assertStringStartsWith('RIFF', $respuesta->getContent());
++    }
++
++    public function test_un_cliente_no_accede_al_modulo_de_verificacion(): void
++    {
++        $cliente = User::factory()->create();
++        $cliente->assignRole('cliente');
++
++        $this->actingAs($cliente)->get(route('prestador.verificacion.show'))->assertForbidden();
++    }
++
++    public function test_no_se_puede_enviar_sin_los_tres_documentos_ni_sin_aceptar_el_aviso(): void
++    {
++        [$user] = $this->prestador();
++        $this->subir($user, 'ine_frente');
++
++        $this->actingAs($user)->post(route('prestador.verificacion.enviar'), ['acepta_aviso' => true])
++            ->assertSessionHasErrors('acepta_aviso');
++
++        $this->subirTodos($user);
++
++        $this->actingAs($user)->post(route('prestador.verificacion.enviar'), [])
++            ->assertSessionHasErrors('acepta_aviso');
++    }
++
++    public function test_enviar_pasa_a_en_revision_y_bloquea_cambios_de_documentos(): void
++    {
++        [$user, $perfil] = $this->prestador();
++        $this->subirTodos($user);
++
++        $this->actingAs($user)->post(route('prestador.verificacion.enviar'), ['acepta_aviso' => true])
++            ->assertSessionHasNoErrors();
++
++        $perfil->refresh();
++        $this->assertSame('en_revision', $perfil->estadoVisible());
++        $this->assertDatabaseHas('log_auditoria', ['accion' => 'prestador.verificacion_enviada', 'entidad_id' => $perfil->id]);
++
++        $this->subir($user, 'ine_frente')->assertSessionHasErrors('foto');
++    }
++
++    /* ------------------------------ lado del revisor ------------------------------ */
++
++    public function test_sin_motivo_el_revisor_no_puede_ver_documentos(): void
++    {
++        [$user] = $this->prestador();
++        $this->subir($user, 'ine_frente');
++        $doc = DocumentosVerificacion::firstOrFail();
++
++        $this->actingAs($this->admin())->get(route('admin.documentos.ver', $doc))->assertForbidden();
++    }
++
++    public function test_declarar_el_motivo_abre_el_acceso_y_queda_en_auditoria(): void
++    {
++        [$user, $perfil] = $this->prestador();
++        $this->subir($user, 'ine_frente');
++
++        $this->actingAs($this->admin())
++            ->post(route('admin.documentos.acceso', $perfil), ['motivo' => ''])
++            ->assertSessionHasErrors('motivo');
++
++        $this->post(route('admin.documentos.acceso', $perfil), ['motivo' => 'Verificación inicial de identidad'])
++            ->assertSessionHasNoErrors();
++
++        $this->assertDatabaseHas('log_auditoria', ['accion' => 'documentos.acceso_autorizado', 'entidad_id' => $perfil->id]);
++    }
++
++    public function test_con_acceso_vigente_se_ve_el_documento_y_cada_lectura_se_audita(): void
++    {
++        [$user, $perfil] = $this->prestador();
++        $this->subir($user, 'ine_frente');
++        $doc = DocumentosVerificacion::firstOrFail();
++
++        $respuesta = $this->actingAs($this->admin())
++            ->withSession(["acceso_documentos.{$perfil->id}" => ['motivo' => 'Revisión inicial', 'hasta' => now()->addMinutes(10)->timestamp]])
++            ->get(route('admin.documentos.ver', $doc))
++            ->assertOk();
++
++        $this->assertSame('image/webp', $respuesta->headers->get('Content-Type'));
++        $this->assertStringContainsString('no-store', $respuesta->headers->get('Cache-Control'));
++        $this->assertStringStartsWith('RIFF', $respuesta->getContent());
++        $this->assertDatabaseHas('log_auditoria', ['accion' => 'documento.consultado', 'entidad_id' => $perfil->id]);
++    }
++
++    public function test_un_acceso_vencido_no_sirve(): void
++    {
++        [$user, $perfil] = $this->prestador();
++        $this->subir($user, 'ine_frente');
++        $doc = DocumentosVerificacion::firstOrFail();
++
++        $this->actingAs($this->admin())
++            ->withSession(["acceso_documentos.{$perfil->id}" => ['motivo' => 'x', 'hasta' => now()->subMinute()->timestamp]])
++            ->get(route('admin.documentos.ver', $doc))
++            ->assertForbidden();
++    }
++
++    public function test_un_archivo_alterado_en_el_almacenamiento_no_se_sirve(): void
++    {
++        [$user, $perfil] = $this->prestador();
++        $this->subir($user, 'ine_frente');
++        $doc = DocumentosVerificacion::firstOrFail();
++
++        Storage::disk('local')->put($doc->ruta_cifrada, 'contenido-manipulado');
++
++        $this->actingAs($this->admin())
++            ->withSession(["acceso_documentos.{$perfil->id}" => ['motivo' => 'x', 'hasta' => now()->addMinutes(5)->timestamp]])
++            ->get(route('admin.documentos.ver', $doc))
++            ->assertNotFound();
++    }
++
++    public function test_un_prestador_no_puede_usar_las_rutas_de_revision(): void
++    {
++        [$user, $perfil] = $this->prestador();
++        $this->subir($user, 'ine_frente');
++        $doc = DocumentosVerificacion::firstOrFail();
++
++        $this->actingAs($user)->get(route('admin.documentos.ver', $doc))->assertForbidden();
++        $this->actingAs($user)->post(route('admin.documentos.acceso', $perfil), ['motivo' => 'curioseando'])->assertForbidden();
++        $this->actingAs($user)->patch(route('admin.documentos.revisar', $doc), ['estado' => 'valido'])->assertForbidden();
++    }
++
++    public function test_rechazar_un_documento_exige_motivo(): void
++    {
++        [$user] = $this->prestador();
++        $this->subir($user, 'ine_frente');
++        $doc = DocumentosVerificacion::firstOrFail();
++        $admin = $this->admin();
++
++        $this->actingAs($admin)->patch(route('admin.documentos.revisar', $doc), ['estado' => 'rechazado'])
++            ->assertSessionHasErrors('motivo');
++
++        $this->patch(route('admin.documentos.revisar', $doc), ['estado' => 'rechazado', 'motivo' => 'Foto borrosa'])
++            ->assertSessionHasNoErrors();
++
++        $this->assertSame('rechazado', $doc->fresh()->estado);
++        $this->assertSame('Foto borrosa', $doc->fresh()->motivo);
++    }
++
++    /* ------------------------------ aprobación / rechazo ------------------------------ */
++
++    public function test_no_se_aprueba_a_un_prestador_sin_documentos(): void
++    {
++        [, $perfil] = $this->prestador();
++
++        $this->actingAs($this->admin())
++            ->patch(route('admin.prestadores.updateStatus', $perfil), ['estado' => 'aprobado'])
++            ->assertSessionHas('error');
++
++        $this->assertSame('pendiente', $perfil->fresh()->estado_verificacion);
++    }
++
++    public function test_aprobar_con_documentos_completos_marca_los_documentos_como_validos(): void
++    {
++        [$user, $perfil] = $this->prestador();
++        $this->subirTodos($user);
++
++        $this->actingAs($this->admin())
++            ->patch(route('admin.prestadores.updateStatus', $perfil), ['estado' => 'aprobado'])
++            ->assertSessionHasNoErrors();
++
++        $this->assertSame('verificado', $perfil->fresh()->estado_verificacion);
++        $this->assertSame(3, $perfil->documentos()->where('estado', 'valido')->count());
++    }
++
++    public function test_no_se_aprueba_con_un_documento_rechazado(): void
++    {
++        [$user, $perfil] = $this->prestador();
++        $this->subirTodos($user);
++        $perfil->documentos()->where('tipo', 'ine_frente')->update(['estado' => 'rechazado', 'motivo' => 'Borrosa']);
++
++        $this->actingAs($this->admin())
++            ->patch(route('admin.prestadores.updateStatus', $perfil), ['estado' => 'aprobado'])
++            ->assertSessionHas('error');
++
++        $this->assertSame('pendiente', $perfil->fresh()->estado_verificacion);
++    }
++
++    public function test_rechazar_al_prestador_exige_motivo_y_lo_guarda(): void
++    {
++        [, $perfil] = $this->prestador();
++        $admin = $this->admin();
++
++        $this->actingAs($admin)->patch(route('admin.prestadores.updateStatus', $perfil), ['estado' => 'rechazado'])
++            ->assertSessionHasErrors('motivo');
++
++        $this->patch(route('admin.prestadores.updateStatus', $perfil), [
++            'estado' => 'rechazado',
++            'motivo' => 'La INE no coincide con el nombre del perfil.',
++        ])->assertSessionHasNoErrors();
++
++        $perfil->refresh();
++        $this->assertSame('rechazado', $perfil->estado_verificacion);
++        $this->assertSame('La INE no coincide con el nombre del perfil.', $perfil->motivo_rechazo);
++        $this->assertTrue($perfil->puedeEditarDocumentos());
++    }
++
++    /* ---------------------------------- retención ---------------------------------- */
++
++    public function test_la_purga_elimina_el_archivo_de_documentos_resueltos_vencidos(): void
++    {
++        [$user, $perfil] = $this->prestador();
++        $this->subir($user, 'ine_frente');
++        $doc = DocumentosVerificacion::firstOrFail();
++        $ruta = $doc->ruta_cifrada;
++
++        $perfil->update(['estado_verificacion' => 'verificado']);
++        DocumentosVerificacion::whereKey($doc->id)->update(['estado' => 'valido', 'updated_at' => now()->subDays(400)]);
++
++        $this->artisan('verificacion:purgar-documentos')->assertSuccessful();
++
++        Storage::disk('local')->assertMissing($ruta);
++        $doc->refresh();
++        $this->assertNotNull($doc->purgado_at);
++        $this->assertSame('', $doc->ruta_cifrada);
++        $this->assertDatabaseHas('log_auditoria', ['accion' => 'documento.purgado', 'entidad_id' => $perfil->id]);
++    }
++
++    public function test_la_purga_respeta_los_documentos_recientes_o_de_solicitudes_abiertas(): void
++    {
++        [$user, $perfil] = $this->prestador();
++        $this->subir($user, 'ine_frente');
++        $doc = DocumentosVerificacion::firstOrFail();
++
++        // Perfil aún pendiente: aunque el documento sea viejo, no se toca.
++        DocumentosVerificacion::whereKey($doc->id)->update(['estado' => 'valido', 'updated_at' => now()->subDays(400)]);
++
++        $this->artisan('verificacion:purgar-documentos')->assertSuccessful();
++
++        Storage::disk('local')->assertExists($doc->fresh()->ruta_cifrada);
++        $this->assertNull($doc->fresh()->purgado_at);
++    }
++}

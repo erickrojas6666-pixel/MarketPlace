@@ -47,6 +47,9 @@ class AuthenticatedSessionController extends Controller
 
         $request->session()->regenerateToken();
 
+        // Borra del navegador el historial cifrado de la sesión que acaba de cerrarse.
+        Inertia::clearHistory();
+
         return redirect('/');
     }
 }

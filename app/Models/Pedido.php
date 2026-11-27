@@ -112,6 +112,12 @@ class Pedido extends Model
         return $this->hasOne(Resena::class);
     }
 
+    /** Disputa del pedido (RF-38); como mucho una. */
+    public function disputa(): HasOne
+    {
+        return $this->hasOne(Disputa::class, 'pedido_id');
+    }
+
     /** Evidencia fotográfica (antes / durante / después), en almacenamiento privado. */
     public function evidencias(): HasMany
     {
@@ -121,5 +127,11 @@ class Pedido extends Model
     public function resenas(): HasMany
     {
         return $this->hasMany(Resena::class);
+    }
+
+    /** Chat del pedido (RF-22), en orden de envío. */
+    public function mensajes(): HasMany
+    {
+        return $this->hasMany(Mensaje::class, 'pedido_id')->orderBy('id');
     }
 }

@@ -20,6 +20,9 @@ class DashboardController extends Controller
     private const MAX_CATALOGO = 100;
     private const MAX_NOTIFICACIONES = 20;
 
+    /** Disputa del pedido (RF-38): solo lo que ven las dos partes; nada del mediador. */
+    private const DISPUTA = 'disputa:id,pedido_id,estado,motivo,resolucion_notas';
+
     public function __invoke(Request $request): Response
     {
         $user = $request->user();
@@ -55,7 +58,11 @@ class DashboardController extends Controller
                     'servicio',
                     fn ($q) => $q->where('perfil_prestador_id', $perfil->id)
                 )
-                    ->with(['cliente:id,nombre', 'servicio.categoria:id,nombre'])
+                    ->with([
+                        'cliente:id,nombre',
+                        'servicio.categoria:id,nombre',
+                        self::DISPUTA,
+                    ])
                     ->latest()
                     ->limit(self::MAX_PEDIDOS)
                     ->get();
@@ -66,6 +73,7 @@ class DashboardController extends Controller
                         'servicio.perfilPrestador:id,user_id',
                         'servicio.perfilPrestador.user:id,nombre',
                         'resena',
+                        self::DISPUTA,
                     ])
                     ->latest()
                     ->limit(self::MAX_PEDIDOS)

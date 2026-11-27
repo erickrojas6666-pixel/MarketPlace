@@ -1,9 +1,11 @@
 <script setup>
 import { ref, computed, onMounted, watch } from 'vue'
-import { Head, router, useForm, usePage } from '@inertiajs/vue3'
+import { Head, Link, router, useForm, usePage } from '@inertiajs/vue3'
 import AuthenticatedLayout from '@/Layouts/AuthenticatedLayout.vue'
 import BuscadorUbicacion from '@/Components/BuscadorUbicacion.vue'
 import EvidenciaPedido from '@/Components/EvidenciaPedido.vue'
+import ChatPedido from '@/Components/ChatPedido.vue'
+import { usarNoLeidos } from '@/composables/useChat'
 import { useGeolocalizacion, redondear } from '@/composables/useGeolocalizacion'
 import { encolar, mostrarAviso } from '@/offline/sync'
 import { guardarDashboard } from '@/offline/snapshots'
@@ -34,6 +36,13 @@ const guardarCopiaLocal = () => {
   })
 }
 onMounted(guardarCopiaLocal)
+
+// Chat del pedido (RF-22): contador de mensajes sin leer y apertura directa desde el aviso
+// push, que lleva a /dashboard?chat=ID.
+usarNoLeidos()
+const chatInicial = typeof window !== 'undefined'
+  ? Number(new URLSearchParams(window.location.search).get('chat')) || null
+  : null
 watch(() => [props.pedidos, props.misPedidos, props.todosLosServicios], guardarCopiaLocal)
 
 // Única fuente de verdad: lo decide DashboardController (rol + perfil).
@@ -97,6 +106,8 @@ const estiloEstado = (estado) => {
       return { badge: 'bg-niebla text-principal border-principal/20', punto: 'bg-principal' }
     case 'completado':
       return { badge: 'bg-green-50 text-green-700 border-green-200', punto: 'bg-green-500' }
+    case 'en_disputa':
+      return { badge: 'bg-orange-50 text-orange-700 border-orange-200', punto: 'bg-orange-500' }
     case 'rechazado':
     case 'cancelado':
       return { badge: 'bg-red-50 text-red-700 border-red-200', punto: 'bg-red-500' }
@@ -124,14 +135,14 @@ const estiloVerificacion = computed(() => {
 
 /* ---------- Resúmenes para los banners ---------- */
 const pedidosActivosCliente = computed(
-  () => props.misPedidos.filter((p) => ['pendiente', 'aceptado', 'en_progreso'].includes(p.estado)).length
+  () => props.misPedidos.filter((p) => ['pendiente', 'aceptado', 'en_progreso', 'en_disputa'].includes(p.estado)).length
 )
 const pedidosCompletadosCliente = computed(
   () => props.misPedidos.filter((p) => ['completado', 'confirmado'].includes(p.estado)).length
 )
 const serviciosActivos = computed(() => props.servicios.filter((s) => s.activo).length)
 const pedidosPorAtender = computed(
-  () => props.pedidos.filter((p) => ['pendiente', 'aceptado', 'pagado', 'en_progreso'].includes(p.estado)).length
+  () => props.pedidos.filter((p) => ['pendiente', 'aceptado', 'pagado', 'en_progreso', 'en_disputa'].includes(p.estado)).length
 )
 
 // --- FILTROS DE BÚSQUEDA Y ESPECIALIDAD PARA CLIENTE ---
@@ -260,6 +271,65 @@ const enviarResena = (pedidoId) => {
   )
 }
 
+// --- DISPUTAS (RF-38) ---
+// El módulo lo enciende MARKETPLACE_DISPUTAS; sin él, el cliente solo puede confirmar.
+const disputasHabilitadas = computed(() => !!page.props.marketplace?.disputasHabilitadas)
+
+const disputaAbierta = (disputa) => ['abierta', 'en_revision'].includes(disputa?.estado)
+
+// Se describe el desenlace del pedido (siempre cierto); el detalle del dinero lo explica el mediador en sus notas.
+const textoDisputa = (disputa, comoCliente) => {
+  switch (disputa?.estado) {
+    case 'abierta':
+      return comoCliente
+        ? 'Tu disputa está abierta. Un mediador la revisará y el pago sigue retenido hasta que decida.'
+        : 'El cliente abrió una disputa. Aporta tus fotos de evidencia; un mediador revisará ambas versiones.'
+    case 'en_revision':
+      return 'Un mediador está revisando la evidencia de ambas partes.'
+    case 'resuelta_favor_cliente':
+      return comoCliente
+        ? 'Resuelta a tu favor: el pedido se canceló y el pago se devuelve.'
+        : 'Resuelta a favor del cliente: el pedido se canceló.'
+    case 'resuelta_favor_prestador':
+      return comoCliente
+        ? 'Resuelta a favor del prestador: el trabajo quedó confirmado y el pago se liberó.'
+        : 'Resuelta a tu favor: el trabajo quedó confirmado y el pago se liberó.'
+    default:
+      return 'La disputa fue cancelada.'
+  }
+}
+
+const pedidoADisputar = ref(null)
+const formDisputa = useForm({ motivo: '' })
+const MIN_MOTIVO = 20
+
+const abrirModalDisputa = (pedido) => {
+  pedidoADisputar.value = pedido
+  formDisputa.reset()
+  formDisputa.clearErrors()
+}
+
+const cerrarModalDisputa = () => {
+  pedidoADisputar.value = null
+  formDisputa.clearErrors()
+}
+
+const enviarDisputa = () => {
+  // Las fotos y la mediación necesitan conexión: no se encola sin red.
+  if (!navigator.onLine) {
+    mostrarAviso('error', 'Necesitas conexión para abrir una disputa.')
+    return
+  }
+
+  formDisputa.post(route('pedidos.disputa.store', pedidoADisputar.value.id), {
+    preserveScroll: true,
+    onSuccess: () => {
+      pedidoADisputar.value = null
+      formDisputa.reset()
+    },
+  })
+}
+
 // --- NUEVO SERVICIO (PRESTADOR) ---
 const mostrarFormServicio = ref(false)
 const formServicio = useForm({
@@ -302,7 +372,6 @@ const marcarNotificacionesLeidas = () => {
 </script>
 
 <template>
-
   <Head title="Dashboard" />
 
   <AuthenticatedLayout>
@@ -313,14 +382,15 @@ const marcarNotificacionesLeidas = () => {
         <div class="flex items-center justify-between gap-4">
           <div class="flex items-center gap-3">
             <h2 class="text-xs font-bold text-gris-medio uppercase tracking-wider">Notificaciones pendientes</h2>
-            <span
-              class="min-w-7 h-7 px-2 rounded-full bg-acento text-principal text-xs font-extrabold flex items-center justify-center shadow-sm">
+            <span class="min-w-7 h-7 px-2 rounded-full bg-acento text-principal text-xs font-extrabold flex items-center justify-center shadow-sm">
               {{ notificaciones.length }}
             </span>
           </div>
 
-          <button @click="marcarNotificacionesLeidas"
-            class="inline-flex items-center gap-1.5 px-3.5 py-2 bg-white hover:bg-niebla text-principal text-xs font-bold rounded-xl border-2 border-slate-200 hover:border-principal/40 transition active:scale-95">
+          <button
+            @click="marcarNotificacionesLeidas"
+            class="inline-flex items-center gap-1.5 px-3.5 py-2 bg-white hover:bg-niebla text-principal text-xs font-bold rounded-xl border-2 border-slate-200 hover:border-principal/40 transition active:scale-95"
+          >
             <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="3" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" :d="iconos.check" />
             </svg>
@@ -328,10 +398,16 @@ const marcarNotificacionesLeidas = () => {
           </button>
         </div>
 
-        <div v-for="n in notificaciones" :key="n.id" class="p-4 rounded-2xl border-2 shadow-md flex items-start gap-3"
-          :class="estiloNotificacion(n?.data?.estado).caja">
-          <div class="w-10 h-10 shrink-0 rounded-xl flex items-center justify-center"
-            :class="estiloNotificacion(n?.data?.estado).icono">
+        <div
+          v-for="n in notificaciones"
+          :key="n.id"
+          class="p-4 rounded-2xl border-2 shadow-md flex items-start gap-3"
+          :class="estiloNotificacion(n?.data?.estado).caja"
+        >
+          <div
+            class="w-10 h-10 shrink-0 rounded-xl flex items-center justify-center"
+            :class="estiloNotificacion(n?.data?.estado).icono"
+          >
             <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" :d="estiloNotificacion(n?.data?.estado).path" />
             </svg>
@@ -349,15 +425,13 @@ const marcarNotificacionesLeidas = () => {
       <div v-if="esPrestadorUser" class="space-y-8">
 
         <!-- Banner -->
-        <section
-          class="relative overflow-hidden rounded-3xl bg-gradient-to-br from-principal via-principal to-[#1d4a8a] p-6 sm:p-10 shadow-xl shadow-principal/20">
+        <section class="relative overflow-hidden rounded-3xl bg-gradient-to-br from-principal via-principal to-[#1d4a8a] p-6 sm:p-10 shadow-xl shadow-principal/20">
           <div class="absolute -top-16 -right-16 w-72 h-72 rounded-full bg-acento/20 blur-2xl"></div>
           <div class="absolute -bottom-24 left-1/3 w-80 h-80 rounded-full bg-white/5"></div>
 
           <div class="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-8">
             <div class="space-y-3">
-              <span
-                class="inline-flex items-center gap-2 py-1.5 px-4 rounded-full bg-white/10 text-niebla text-xs font-bold tracking-wider uppercase border border-white/15">
+              <span class="inline-flex items-center gap-2 py-1.5 px-4 rounded-full bg-white/10 text-niebla text-xs font-bold tracking-wider uppercase border border-white/15">
                 <span class="w-2 h-2 rounded-full bg-acento animate-pulse"></span>
                 Panel de prestador
               </span>
@@ -366,12 +440,17 @@ const marcarNotificacionesLeidas = () => {
                 Hola, <span class="text-acento">{{ nombreUsuario }}</span>
               </h1>
 
-              <span v-if="perfil?.estado_verificacion"
-                class="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full text-[11px] font-bold uppercase tracking-wider border"
-                :class="estiloVerificacion.badge">
+              <Link
+                v-if="perfil?.estado_verificacion"
+                :href="route('prestador.verificacion.show')"
+                class="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full text-[11px] font-bold uppercase tracking-wider border hover:brightness-110 transition"
+                :class="estiloVerificacion.badge"
+                title="Ver o completar mi verificación de identidad"
+              >
                 <span class="w-1.5 h-1.5 rounded-full" :class="estiloVerificacion.punto"></span>
                 Perfil {{ perfil.estado_verificacion }}
-              </span>
+                <template v-if="perfil.estado_verificacion !== 'verificado'"> · completar →</template>
+              </Link>
             </div>
 
             <div class="flex gap-3">
@@ -388,8 +467,10 @@ const marcarNotificacionesLeidas = () => {
         </section>
 
         <!-- Aviso de perfil sin verificar -->
-        <div v-if="!estaVerificado"
-          class="p-4 rounded-2xl bg-amber-50 border-2 border-amber-200 text-amber-800 flex items-start gap-3">
+        <div
+          v-if="!estaVerificado"
+          class="p-4 rounded-2xl bg-amber-50 border-2 border-amber-200 text-amber-800 flex items-start gap-3"
+        >
           <div class="w-10 h-10 shrink-0 rounded-xl bg-amber-100 text-amber-600 flex items-center justify-center">
             <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" :d="iconos.alerta" />
@@ -412,18 +493,19 @@ const marcarNotificacionesLeidas = () => {
             </div>
 
             <div class="flex items-center gap-3">
-              <span
-                class="min-w-8 h-8 px-3 rounded-full bg-niebla text-principal text-sm font-extrabold flex items-center justify-center border border-principal/15">
+              <span class="min-w-8 h-8 px-3 rounded-full bg-niebla text-principal text-sm font-extrabold flex items-center justify-center border border-principal/15">
                 {{ servicios.length }}
               </span>
-              <button v-if="estaVerificado" @click="mostrarFormServicio = !mostrarFormServicio"
+              <button
+                v-if="estaVerificado"
+                @click="mostrarFormServicio = !mostrarFormServicio"
                 class="inline-flex items-center gap-2 px-4 py-2.5 text-sm font-bold rounded-xl shadow-md transition-all duration-200 active:scale-95"
                 :class="mostrarFormServicio
                   ? 'bg-white text-grafito border-2 border-slate-200 hover:bg-slate-50'
-                  : 'bg-acento text-principal hover:bg-yellow-400 hover:-translate-y-0.5 hover:shadow-lg'">
+                  : 'bg-acento text-principal hover:bg-yellow-400 hover:-translate-y-0.5 hover:shadow-lg'"
+              >
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round"
-                    :d="mostrarFormServicio ? iconos.cerrar : iconos.mas" />
+                  <path stroke-linecap="round" stroke-linejoin="round" :d="mostrarFormServicio ? iconos.cerrar : iconos.mas" />
                 </svg>
                 {{ mostrarFormServicio ? 'Cancelar' : 'Publicar servicio' }}
               </button>
@@ -431,48 +513,67 @@ const marcarNotificacionesLeidas = () => {
           </div>
 
           <!-- Formulario de nuevo servicio -->
-          <form v-if="mostrarFormServicio" @submit.prevent="guardarServicio"
-            class="p-5 bg-niebla/40 rounded-2xl border border-slate-200 space-y-4">
+          <form
+            v-if="mostrarFormServicio"
+            @submit.prevent="guardarServicio"
+            class="p-5 bg-niebla/40 rounded-2xl border border-slate-200 space-y-4"
+          >
             <div>
-              <label for="servicio-titulo" :class="claseLabel">Nombre del servicio</label>
-              <input id="servicio-titulo" v-model="formServicio.titulo" type="text" required maxlength="255"
-                placeholder="Ej: Reparación de fugas y cañerías" :class="claseInput" />
-              <span v-if="formServicio.errors.titulo" class="block mt-1 text-xs font-semibold text-red-600">{{
-                formServicio.errors.titulo }}</span>
+              <label :class="claseLabel">Nombre del servicio</label>
+              <input
+                v-model="formServicio.titulo"
+                type="text"
+                required
+                maxlength="255"
+                placeholder="Ej: Reparación de fugas y cañerías"
+                :class="claseInput"
+              />
+              <span v-if="formServicio.errors.titulo" class="block mt-1 text-xs font-semibold text-red-600">{{ formServicio.errors.titulo }}</span>
             </div>
 
             <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
-                <label for="servicio-categoria" :class="claseLabel">Categoría</label>
-                <select id="servicio-categoria" v-model="formServicio.categoria_id" required :class="claseInput">
+                <label :class="claseLabel">Categoría</label>
+                <select v-model="formServicio.categoria_id" required :class="claseInput">
                   <option value="" disabled>Selecciona una categoría</option>
                   <option v-for="c in categorias" :key="c.id" :value="c.id">{{ c.nombre }}</option>
                 </select>
-                <span v-if="formServicio.errors.categoria_id" class="block mt-1 text-xs font-semibold text-red-600">{{
-                  formServicio.errors.categoria_id }}</span>
+                <span v-if="formServicio.errors.categoria_id" class="block mt-1 text-xs font-semibold text-red-600">{{ formServicio.errors.categoria_id }}</span>
               </div>
 
               <div>
-                <label for="servicio-precio" :class="claseLabel">Precio estimado ($)</label>
-                <input id="servicio-precio" v-model="formServicio.precio" type="number" step="0.01" min="0"
-                  placeholder="0.00" :class="claseInput" />
-                <span v-if="formServicio.errors.precio" class="block mt-1 text-xs font-semibold text-red-600">{{
-                  formServicio.errors.precio }}</span>
+                <label :class="claseLabel">Precio estimado ($)</label>
+                <input
+                  v-model="formServicio.precio"
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  placeholder="0.00"
+                  :class="claseInput"
+                />
+                <span v-if="formServicio.errors.precio" class="block mt-1 text-xs font-semibold text-red-600">{{ formServicio.errors.precio }}</span>
               </div>
             </div>
 
             <div>
-              <label for="servicio-descripcion" :class="claseLabel">Descripción detallada</label>
-              <textarea id="servicio-descripcion" v-model="formServicio.descripcion" rows="3" required
-                placeholder="Describe lo que incluye..." :class="claseInput"></textarea>
-              <span v-if="formServicio.errors.descripcion" class="block mt-1 text-xs font-semibold text-red-600">{{
-                formServicio.errors.descripcion }}</span>
+              <label :class="claseLabel">Descripción detallada</label>
+              <textarea
+                v-model="formServicio.descripcion"
+                rows="3"
+                required
+                placeholder="Describe lo que incluye..."
+                :class="claseInput"
+              ></textarea>
+              <span v-if="formServicio.errors.descripcion" class="block mt-1 text-xs font-semibold text-red-600">{{ formServicio.errors.descripcion }}</span>
             </div>
 
             <div class="flex justify-end">
-              <button type="submit" :disabled="formServicio.processing"
+              <button
+                type="submit"
+                :disabled="formServicio.processing"
                 class="px-6 py-2.5 bg-principal text-white text-sm font-bold rounded-xl shadow-md hover:bg-slate-800 transition-all duration-200 active:scale-95"
-                :class="{ 'opacity-50 cursor-not-allowed': formServicio.processing }">
+                :class="{ 'opacity-50 cursor-not-allowed': formServicio.processing }"
+              >
                 Guardar y publicar
               </button>
             </div>
@@ -491,24 +592,28 @@ const marcarNotificacionesLeidas = () => {
 
           <!-- Lista -->
           <ul v-else class="space-y-3">
-            <li v-for="s in servicios" :key="s.id"
-              class="p-4 bg-niebla/40 rounded-2xl border border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-4 hover:border-principal/30 hover:bg-niebla/60 transition-colors duration-200">
+            <li
+              v-for="s in servicios"
+              :key="s.id"
+              class="p-4 bg-niebla/40 rounded-2xl border border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-4 hover:border-principal/30 hover:bg-niebla/60 transition-colors duration-200"
+            >
               <div class="min-w-0">
                 <div class="flex items-center gap-2 flex-wrap">
                   <p class="font-bold text-sm text-principal">{{ s.titulo }}</p>
-                  <span
-                    class="text-xs font-extrabold text-principal bg-acento/20 border border-acento/50 px-2.5 py-0.5 rounded-full">
+                  <span class="text-xs font-extrabold text-principal bg-acento/20 border border-acento/50 px-2.5 py-0.5 rounded-full">
                     ${{ precioDe(s) }}
                   </span>
                 </div>
                 <p class="text-xs text-gris-medio mt-1 line-clamp-2">{{ s.descripcion }}</p>
               </div>
 
-              <button @click="toggleServicio(s.id)"
+              <button
+                @click="toggleServicio(s.id)"
                 class="shrink-0 inline-flex items-center gap-2 px-3.5 py-2 text-[11px] font-bold uppercase tracking-wider rounded-full border transition active:scale-95"
                 :class="s.activo
                   ? 'bg-green-50 text-green-700 border-green-200 hover:bg-green-100'
-                  : 'bg-slate-100 text-grafito border-slate-300 hover:bg-slate-200'">
+                  : 'bg-slate-100 text-grafito border-slate-300 hover:bg-slate-200'"
+              >
                 <span class="w-1.5 h-1.5 rounded-full" :class="s.activo ? 'bg-green-500' : 'bg-slate-400'"></span>
                 {{ s.activo ? 'Público (activo)' : 'Oculto (inactivo)' }}
               </button>
@@ -523,8 +628,7 @@ const marcarNotificacionesLeidas = () => {
               <h2 class="font-extrabold text-lg text-principal tracking-tight">Pedidos recibidos</h2>
               <p class="text-xs text-gris-medio mt-0.5">Solicitudes de tus clientes</p>
             </div>
-            <span
-              class="min-w-8 h-8 px-3 rounded-full bg-niebla text-principal text-sm font-extrabold flex items-center justify-center border border-principal/15">
+            <span class="min-w-8 h-8 px-3 rounded-full bg-niebla text-principal text-sm font-extrabold flex items-center justify-center border border-principal/15">
               {{ pedidos.length }}
             </span>
           </div>
@@ -542,11 +646,13 @@ const marcarNotificacionesLeidas = () => {
 
           <!-- Lista -->
           <div v-else class="space-y-3">
-            <div v-for="p in pedidos" :key="p.id"
-              class="p-4 bg-niebla/40 rounded-2xl border border-slate-200 flex flex-col md:flex-row justify-between items-start md:items-center gap-4 hover:border-principal/30 hover:bg-niebla/60 transition-colors duration-200">
+            <div
+              v-for="p in pedidos"
+              :key="p.id"
+              class="p-4 bg-niebla/40 rounded-2xl border border-slate-200 flex flex-col md:flex-row justify-between items-start md:items-center gap-4 hover:border-principal/30 hover:bg-niebla/60 transition-colors duration-200"
+            >
               <div class="flex items-start gap-3 min-w-0">
-                <div
-                  class="w-11 h-11 shrink-0 rounded-xl bg-gradient-to-br from-principal to-[#1d4a8a] text-white font-extrabold text-sm flex items-center justify-center shadow-sm">
+                <div class="w-11 h-11 shrink-0 rounded-xl bg-gradient-to-br from-principal to-[#1d4a8a] text-white font-extrabold text-sm flex items-center justify-center shadow-sm">
                   {{ iniciales(nombreDe(p.cliente, 'Cliente')) }}
                 </div>
 
@@ -555,44 +661,68 @@ const marcarNotificacionesLeidas = () => {
                     <span class="font-bold text-sm text-principal">Pedido #{{ p.id }}</span>
                     <span
                       class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-bold uppercase tracking-wider border"
-                      :class="estiloEstado(p.estado).badge">
+                      :class="estiloEstado(p.estado).badge"
+                    >
                       <span class="w-1.5 h-1.5 rounded-full" :class="estiloEstado(p.estado).punto"></span>
                       {{ etiquetaEstado(p.estado) }}
                     </span>
                   </div>
-                  <p class="text-xs text-grafito"><strong class="text-principal">Cliente:</strong> {{
-                    nombreDe(p.cliente, 'Cliente') }}</p>
-                  <p class="text-xs text-grafito"><strong class="text-principal">Servicio:</strong> {{
-                    p.servicio?.titulo || ('Servicio #' + p.servicio_id) }}</p>
+                  <p class="text-xs text-grafito"><strong class="text-principal">Cliente:</strong> {{ nombreDe(p.cliente, 'Cliente') }}</p>
+                  <p class="text-xs text-grafito"><strong class="text-principal">Servicio:</strong> {{ p.servicio?.titulo || ('Servicio #' + p.servicio_id) }}</p>
                   <p v-if="p.direccion_servicio" class="text-xs text-gris-medio flex items-center gap-1">
-                    <svg class="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2"
-                      viewBox="0 0 24 24">
+                    <svg class="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
                       <path stroke-linecap="round" stroke-linejoin="round" :d="iconos.pin" />
                     </svg>
                     {{ p.direccion_servicio }}
                   </p>
+
+                  <!-- Disputa (RF-38) -->
+                  <div
+                    v-if="p.disputa"
+                    class="mt-2 px-3 py-2 rounded-xl border text-xs"
+                    :class="disputaAbierta(p.disputa) ? 'bg-orange-50 border-orange-200 text-orange-900' : 'bg-white border-slate-200 text-grafito'"
+                  >
+                    <p class="font-bold">{{ textoDisputa(p.disputa, false) }}</p>
+                    <p v-if="disputaAbierta(p.disputa)" class="mt-1 italic">Motivo del cliente: “{{ p.disputa.motivo }}”</p>
+                    <p v-else-if="p.disputa.resolucion_notas" class="mt-1 italic">Mediador: “{{ p.disputa.resolucion_notas }}”</p>
+                  </div>
                 </div>
               </div>
 
               <div class="flex flex-wrap gap-2 shrink-0">
-                <button v-if="p.estado === 'pendiente'" @click="cambiarEstadoPedido(p.id, 'aceptado')"
-                  class="px-4 py-2 bg-green-600 hover:bg-green-700 text-white text-xs font-bold rounded-xl shadow-sm transition active:scale-95">
+                <ChatPedido :pedido-id="p.id" :contraparte="p.cliente?.nombre" :abrir-inicial="chatInicial === p.id" />
+                <button
+                  v-if="p.estado === 'pendiente'"
+                  @click="cambiarEstadoPedido(p.id, 'aceptado')"
+                  class="px-4 py-2 bg-green-600 hover:bg-green-700 text-white text-xs font-bold rounded-xl shadow-sm transition active:scale-95"
+                >
                   Aceptar
                 </button>
-                <button v-if="p.estado === 'pendiente'" @click="cambiarEstadoPedido(p.id, 'rechazado')"
-                  class="px-4 py-2 bg-white hover:bg-red-50 text-red-600 text-xs font-bold rounded-xl border-2 border-red-200 hover:border-red-300 transition active:scale-95">
+                <button
+                  v-if="p.estado === 'pendiente'"
+                  @click="cambiarEstadoPedido(p.id, 'rechazado')"
+                  class="px-4 py-2 bg-white hover:bg-red-50 text-red-600 text-xs font-bold rounded-xl border-2 border-red-200 hover:border-red-300 transition active:scale-95"
+                >
                   Rechazar
                 </button>
-                <button v-if="p.estado === 'aceptado'" @click="cambiarEstadoPedido(p.id, 'en_progreso')"
-                  class="px-4 py-2 bg-principal hover:bg-slate-800 text-white text-xs font-bold rounded-xl shadow-sm transition active:scale-95">
+                <button
+                  v-if="p.estado === 'aceptado'"
+                  @click="cambiarEstadoPedido(p.id, 'en_progreso')"
+                  class="px-4 py-2 bg-principal hover:bg-slate-800 text-white text-xs font-bold rounded-xl shadow-sm transition active:scale-95"
+                >
                   Iniciar trabajo
                 </button>
-                <button v-if="p.estado === 'en_progreso'" @click="cambiarEstadoPedido(p.id, 'completado')"
-                  class="px-4 py-2 bg-acento hover:bg-yellow-400 text-principal text-xs font-bold rounded-xl shadow-sm transition active:scale-95">
+                <button
+                  v-if="p.estado === 'en_progreso'"
+                  @click="cambiarEstadoPedido(p.id, 'completado')"
+                  class="px-4 py-2 bg-acento hover:bg-yellow-400 text-principal text-xs font-bold rounded-xl shadow-sm transition active:scale-95"
+                >
                   Finalizar trabajo
                 </button>
-                <EvidenciaPedido v-if="['en_progreso', 'completado', 'en_disputa', 'confirmado'].includes(p.estado)"
-                  :pedido-id="p.id" />
+                <EvidenciaPedido
+                  v-if="['en_progreso', 'completado', 'en_disputa', 'confirmado'].includes(p.estado)"
+                  :pedido-id="p.id"
+                />
               </div>
             </div>
           </div>
@@ -605,15 +735,13 @@ const marcarNotificacionesLeidas = () => {
       <div v-else class="space-y-8">
 
         <!-- Banner -->
-        <section
-          class="relative overflow-hidden rounded-3xl bg-gradient-to-br from-principal via-principal to-[#1d4a8a] p-6 sm:p-10 shadow-xl shadow-principal/20">
+        <section class="relative overflow-hidden rounded-3xl bg-gradient-to-br from-principal via-principal to-[#1d4a8a] p-6 sm:p-10 shadow-xl shadow-principal/20">
           <div class="absolute -top-16 -right-16 w-72 h-72 rounded-full bg-acento/20 blur-2xl"></div>
           <div class="absolute -bottom-24 left-1/3 w-80 h-80 rounded-full bg-white/5"></div>
 
           <div class="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-8">
             <div class="space-y-3">
-              <span
-                class="inline-flex items-center gap-2 py-1.5 px-4 rounded-full bg-white/10 text-niebla text-xs font-bold tracking-wider uppercase border border-white/15">
+              <span class="inline-flex items-center gap-2 py-1.5 px-4 rounded-full bg-white/10 text-niebla text-xs font-bold tracking-wider uppercase border border-white/15">
                 <span class="w-2 h-2 rounded-full bg-acento animate-pulse"></span>
                 Tu panel
               </span>
@@ -641,9 +769,13 @@ const marcarNotificacionesLeidas = () => {
         <!-- Cerca de mí (lleva al catálogo filtrado por cercanía) -->
         <section class="bg-white rounded-3xl border-2 border-slate-200/90 shadow-md p-6 space-y-4">
           <div class="flex flex-wrap items-center gap-3">
-            <button type="button" @click="usarMiUbicacion" :disabled="ubicando"
+            <button
+              type="button"
+              @click="usarMiUbicacion"
+              :disabled="ubicando"
               class="inline-flex items-center gap-2 px-5 py-2.5 bg-principal hover:bg-slate-800 text-white text-sm font-bold rounded-xl shadow-md transition-all duration-200 active:scale-95"
-              :class="{ 'opacity-50 cursor-not-allowed': ubicando }">
+              :class="{ 'opacity-50 cursor-not-allowed': ubicando }"
+            >
               <svg class="w-4 h-4 text-acento" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" :d="iconos.pin" />
               </svg>
@@ -655,8 +787,7 @@ const marcarNotificacionesLeidas = () => {
             </p>
           </div>
 
-          <p v-if="errorUbicacion"
-            class="text-sm font-semibold text-red-600 bg-red-50 border border-red-200 rounded-xl px-4 py-2.5">
+          <p v-if="errorUbicacion" class="text-sm font-semibold text-red-600 bg-red-50 border border-red-200 rounded-xl px-4 py-2.5">
             {{ errorUbicacion }}
           </p>
 
@@ -668,7 +799,12 @@ const marcarNotificacionesLeidas = () => {
           </p>
 
           <div class="pt-4 border-t border-slate-100">
-            <BuscadorUbicacion embebido seleccionable titulo="¿Sin GPS? Busca tu dirección" @seleccionar="usarLugar" />
+            <BuscadorUbicacion
+              embebido
+              seleccionable
+              titulo="¿Sin GPS? Busca tu dirección"
+              @seleccionar="usarLugar"
+            />
           </div>
         </section>
 
@@ -682,15 +818,22 @@ const marcarNotificacionesLeidas = () => {
           <!-- Buscador -->
           <div class="flex items-center gap-2 bg-white p-2.5 rounded-2xl shadow-xl border border-slate-200">
             <div class="flex-1 flex items-center px-3 gap-2">
-              <svg class="w-5 h-5 text-gray-400 shrink-0" fill="none" stroke="currentColor" stroke-width="2"
-                viewBox="0 0 24 24">
+              <svg class="w-5 h-5 text-gray-400 shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" :d="iconos.buscar" />
               </svg>
-              <input v-model="busquedaTexto" type="text" placeholder="Buscar por especialidad, servicio o prestador..."
-                class="w-full border-0 focus:ring-0 text-grafito placeholder-gray-400 text-sm outline-none bg-transparent" />
+              <input
+                v-model="busquedaTexto"
+                type="text"
+                placeholder="Buscar por especialidad, servicio o prestador..."
+                class="w-full border-0 focus:ring-0 text-grafito placeholder-gray-400 text-sm outline-none bg-transparent"
+              />
             </div>
-            <button v-if="busquedaTexto" type="button" @click="busquedaTexto = ''"
-              class="shrink-0 inline-flex items-center gap-1.5 px-4 py-2.5 bg-niebla hover:bg-niebla/70 text-principal text-xs font-bold rounded-xl transition active:scale-95">
+            <button
+              v-if="busquedaTexto"
+              type="button"
+              @click="busquedaTexto = ''"
+              class="shrink-0 inline-flex items-center gap-1.5 px-4 py-2.5 bg-niebla hover:bg-niebla/70 text-principal text-xs font-bold rounded-xl transition active:scale-95"
+            >
               <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="3" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" :d="iconos.cerrar" />
               </svg>
@@ -700,25 +843,33 @@ const marcarNotificacionesLeidas = () => {
 
           <!-- Categorías -->
           <div class="flex flex-wrap gap-2">
-            <button @click="categoriaSeleccionada = null"
+            <button
+              @click="categoriaSeleccionada = null"
               class="px-4 py-2 rounded-xl text-sm font-bold border-2 transition-all duration-200 active:scale-95"
               :class="!categoriaSeleccionada
                 ? 'bg-principal text-white border-principal shadow-md'
-                : 'bg-white text-principal border-slate-200 hover:border-principal/40'">
+                : 'bg-white text-principal border-slate-200 hover:border-principal/40'"
+            >
               Todas
             </button>
-            <button v-for="c in categorias" :key="c.id" @click="seleccionarCategoria(c.id)"
+            <button
+              v-for="c in categorias"
+              :key="c.id"
+              @click="seleccionarCategoria(c.id)"
               class="px-4 py-2 rounded-xl text-sm font-bold border-2 transition-all duration-200 active:scale-95"
               :class="categoriaSeleccionada === c.id
                 ? 'bg-principal text-white border-principal shadow-md'
-                : 'bg-white text-principal border-slate-200 hover:border-principal/40'">
+                : 'bg-white text-principal border-slate-200 hover:border-principal/40'"
+            >
               {{ c.nombre }}
             </button>
           </div>
 
           <!-- Vacío -->
-          <div v-if="!serviciosFiltrados.length"
-            class="bg-white rounded-3xl border-2 border-slate-200/90 shadow-md py-14 px-6 flex flex-col items-center text-center">
+          <div
+            v-if="!serviciosFiltrados.length"
+            class="bg-white rounded-3xl border-2 border-slate-200/90 shadow-md py-14 px-6 flex flex-col items-center text-center"
+          >
             <div class="w-14 h-14 rounded-2xl bg-niebla text-principal flex items-center justify-center mb-3">
               <svg class="w-7 h-7" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" :d="iconos.buscar" />
@@ -732,16 +883,17 @@ const marcarNotificacionesLeidas = () => {
 
           <!-- Tarjetas -->
           <div v-else class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-            <article v-for="s in serviciosFiltrados" :key="s.id"
-              class="bg-white rounded-2xl border-2 border-slate-200/90 shadow-md hover:shadow-2xl hover:border-principal/40 hover:-translate-y-1.5 transition-all duration-300 overflow-hidden flex flex-col justify-between">
+            <article
+              v-for="s in serviciosFiltrados"
+              :key="s.id"
+              class="bg-white rounded-2xl border-2 border-slate-200/90 shadow-md hover:shadow-2xl hover:border-principal/40 hover:-translate-y-1.5 transition-all duration-300 overflow-hidden flex flex-col justify-between"
+            >
               <div class="p-6 space-y-3">
                 <div class="flex justify-between items-center gap-2">
-                  <span
-                    class="text-[11px] font-bold uppercase tracking-wider text-principal bg-niebla px-3 py-1 rounded-full border border-principal/15 truncate">
+                  <span class="text-[11px] font-bold uppercase tracking-wider text-principal bg-niebla px-3 py-1 rounded-full border border-principal/15 truncate">
                     {{ s.categoria?.nombre || 'General' }}
                   </span>
-                  <span
-                    class="shrink-0 text-sm font-extrabold text-principal bg-acento/20 border border-acento/50 px-3 py-1 rounded-full">
+                  <span class="shrink-0 text-sm font-extrabold text-principal bg-acento/20 border border-acento/50 px-3 py-1 rounded-full">
                     ${{ precioDe(s) }}
                   </span>
                 </div>
@@ -752,8 +904,7 @@ const marcarNotificacionesLeidas = () => {
 
               <div class="px-6 py-4 bg-niebla/40 border-t border-slate-200 flex items-center justify-between gap-3">
                 <div class="flex items-center gap-2.5 min-w-0">
-                  <div
-                    class="w-9 h-9 shrink-0 rounded-xl bg-gradient-to-br from-principal to-[#1d4a8a] text-white font-extrabold text-xs flex items-center justify-center shadow-sm">
+                  <div class="w-9 h-9 shrink-0 rounded-xl bg-gradient-to-br from-principal to-[#1d4a8a] text-white font-extrabold text-xs flex items-center justify-center shadow-sm">
                     {{ iniciales(nombreDe(s.perfil_prestador?.user, 'Prestador Verificado')) }}
                   </div>
                   <div class="min-w-0">
@@ -764,8 +915,10 @@ const marcarNotificacionesLeidas = () => {
                   </div>
                 </div>
 
-                <button @click="abrirModalSolicitar(s)"
-                  class="shrink-0 inline-flex items-center gap-1.5 px-3.5 py-2 bg-principal hover:bg-slate-800 text-white text-xs font-bold rounded-xl shadow-sm transition-all duration-200 active:scale-95">
+                <button
+                  @click="abrirModalSolicitar(s)"
+                  class="shrink-0 inline-flex items-center gap-1.5 px-3.5 py-2 bg-principal hover:bg-slate-800 text-white text-xs font-bold rounded-xl shadow-sm transition-all duration-200 active:scale-95"
+                >
                   Solicitar
                   <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" :d="iconos.flecha" />
@@ -783,8 +936,7 @@ const marcarNotificacionesLeidas = () => {
               <h2 class="font-extrabold text-lg text-principal tracking-tight">Mis pedidos</h2>
               <p class="text-xs text-gris-medio mt-0.5">Sigue el estado de tus solicitudes</p>
             </div>
-            <span
-              class="min-w-8 h-8 px-3 rounded-full bg-niebla text-principal text-sm font-extrabold flex items-center justify-center border border-principal/15">
+            <span class="min-w-8 h-8 px-3 rounded-full bg-niebla text-principal text-sm font-extrabold flex items-center justify-center border border-principal/15">
               {{ misPedidos.length }}
             </span>
           </div>
@@ -802,12 +954,14 @@ const marcarNotificacionesLeidas = () => {
 
           <!-- Lista -->
           <div v-else class="space-y-3">
-            <div v-for="p in misPedidos" :key="p.id"
-              class="p-4 bg-niebla/40 rounded-2xl border border-slate-200 space-y-4">
+            <div
+              v-for="p in misPedidos"
+              :key="p.id"
+              class="p-4 bg-niebla/40 rounded-2xl border border-slate-200 space-y-4"
+            >
               <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                 <div class="flex items-center gap-3 min-w-0">
-                  <div
-                    class="w-11 h-11 shrink-0 rounded-xl bg-white border border-principal/15 text-principal flex items-center justify-center shadow-sm">
+                  <div class="w-11 h-11 shrink-0 rounded-xl bg-white border border-principal/15 text-principal flex items-center justify-center shadow-sm">
                     <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
                       <path stroke-linecap="round" stroke-linejoin="round" :d="iconos.pedidos" />
                     </svg>
@@ -815,18 +969,17 @@ const marcarNotificacionesLeidas = () => {
 
                   <div class="min-w-0">
                     <div class="flex items-center gap-2 flex-wrap">
-                      <span class="font-bold text-sm text-principal">{{ p.servicio?.titulo || ('Pedido #' + p.id)
-                      }}</span>
+                      <span class="font-bold text-sm text-principal">{{ p.servicio?.titulo || ('Pedido #' + p.id) }}</span>
                       <span
                         class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-bold uppercase tracking-wider border"
-                        :class="estiloEstado(p.estado).badge">
+                        :class="estiloEstado(p.estado).badge"
+                      >
                         <span class="w-1.5 h-1.5 rounded-full" :class="estiloEstado(p.estado).punto"></span>
                         {{ etiquetaEstado(p.estado) }}
                       </span>
                     </div>
                     <p v-if="p.created_at" class="text-xs text-gris-medio mt-1 flex items-center gap-1">
-                      <svg class="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2"
-                        viewBox="0 0 24 24">
+                      <svg class="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" :d="iconos.calendario" />
                       </svg>
                       Solicitado el {{ fecha(p.created_at) }}
@@ -834,27 +987,60 @@ const marcarNotificacionesLeidas = () => {
                   </div>
                 </div>
 
-                <button v-if="p.estado === 'pendiente'" @click="cambiarEstadoPedido(p.id, 'cancelado')"
-                  class="shrink-0 inline-flex items-center gap-1.5 px-3.5 py-2 bg-white hover:bg-red-50 text-red-600 text-xs font-bold rounded-xl border-2 border-red-200 hover:border-red-300 transition active:scale-95">
+                <button
+                  v-if="p.estado === 'pendiente'"
+                  @click="cambiarEstadoPedido(p.id, 'cancelado')"
+                  class="shrink-0 inline-flex items-center gap-1.5 px-3.5 py-2 bg-white hover:bg-red-50 text-red-600 text-xs font-bold rounded-xl border-2 border-red-200 hover:border-red-300 transition active:scale-95"
+                >
                   <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="3" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" :d="iconos.cerrar" />
                   </svg>
                   Cancelar
                 </button>
 
-                <button v-if="p.estado === 'aceptado'" @click="pagarPedido(p.id)"
-                  class="shrink-0 px-4 py-2 bg-principal text-white text-xs font-bold rounded-xl shadow-sm hover:bg-slate-800 transition active:scale-95">
+                <button
+                  v-if="p.estado === 'aceptado'"
+                  @click="pagarPedido(p.id)"
+                  class="shrink-0 px-4 py-2 bg-principal text-white text-xs font-bold rounded-xl shadow-sm hover:bg-slate-800 transition active:scale-95"
+                >
                   Pagar
                 </button>
-                <button v-if="p.estado === 'completado'" @click="cambiarEstadoPedido(p.id, 'confirmado')"
-                  class="shrink-0 px-4 py-2 bg-acento text-principal text-xs font-bold rounded-xl shadow-sm hover:brightness-95 transition active:scale-95">
+                <button
+                  v-if="p.estado === 'completado'"
+                  @click="cambiarEstadoPedido(p.id, 'confirmado')"
+                  class="shrink-0 px-4 py-2 bg-acento text-principal text-xs font-bold rounded-xl shadow-sm hover:brightness-95 transition active:scale-95"
+                >
                   Confirmar trabajo
+                </button>
+                <button
+                  v-if="p.estado === 'completado' && disputasHabilitadas && !p.disputa"
+                  @click="abrirModalDisputa(p)"
+                  class="shrink-0 inline-flex items-center gap-1.5 px-3.5 py-2 bg-white hover:bg-orange-50 text-orange-700 text-xs font-bold rounded-xl border-2 border-orange-200 hover:border-orange-300 transition active:scale-95"
+                >
+                  <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" :d="iconos.alerta" />
+                  </svg>
+                  Reportar un problema
                 </button>
               </div>
 
+              <!-- Disputa (RF-38) -->
+              <div
+                v-if="p.disputa"
+                class="px-3 py-2 rounded-xl border text-xs"
+                :class="disputaAbierta(p.disputa) ? 'bg-orange-50 border-orange-200 text-orange-900' : 'bg-white border-slate-200 text-grafito'"
+              >
+                <p class="font-bold">{{ textoDisputa(p.disputa, true) }}</p>
+                <p v-if="p.disputa.resolucion_notas" class="mt-1 italic">Mediador: “{{ p.disputa.resolucion_notas }}”</p>
+              </div>
+
+              <!-- Chat con el prestador (RF-22) -->
+              <div class="pt-3 border-t border-slate-200">
+                <ChatPedido :pedido-id="p.id" :contraparte="p.servicio?.perfilPrestador?.user?.nombre" :abrir-inicial="chatInicial === p.id" />
+              </div>
+
               <!-- Evidencia fotográfica (privada): cuando el trabajo ya empezó -->
-              <div v-if="['en_progreso', 'completado', 'en_disputa', 'confirmado'].includes(p.estado)"
-                class="pt-3 border-t border-slate-200">
+              <div v-if="['en_progreso', 'completado', 'en_disputa', 'confirmado'].includes(p.estado)" class="pt-3 border-t border-slate-200">
                 <EvidenciaPedido :pedido-id="p.id" />
               </div>
 
@@ -864,9 +1050,14 @@ const marcarNotificacionesLeidas = () => {
                   <div class="flex items-center gap-2">
                     <span class="text-xs font-bold text-principal uppercase tracking-wider">Tu reseña</span>
                     <div class="flex">
-                      <svg v-for="n in 5" :key="n" class="w-4 h-4"
+                      <svg
+                        v-for="n in 5"
+                        :key="n"
+                        class="w-4 h-4"
                         :class="n <= (p.resena.calificacion || 5) ? 'text-acento' : 'text-slate-300'"
-                        viewBox="0 0 20 20" fill="currentColor">
+                        viewBox="0 0 20 20"
+                        fill="currentColor"
+                      >
                         <path :d="iconos.estrella" />
                       </svg>
                     </div>
@@ -876,17 +1067,22 @@ const marcarNotificacionesLeidas = () => {
 
                 <form v-else @submit.prevent="enviarResena(p.id)" class="space-y-3">
                   <div class="flex items-center gap-3">
-                    <span :id="`resena-titulo-${p.id}`"
-                      class="text-xs font-bold text-principal uppercase tracking-wider">Calificar servicio</span>
-                    <div class="flex gap-0.5" role="radiogroup" :aria-labelledby="`resena-titulo-${p.id}`">
-                      <button v-for="n in 5" :key="n" type="button" role="radio"
-                        :aria-checked="n === (calificacionForm[p.id] || 5)"
-                        :aria-label="n + (n === 1 ? ' estrella' : ' estrellas')" @click="calificacionForm[p.id] = n"
+                    <label class="text-xs font-bold text-principal uppercase tracking-wider">Calificar servicio</label>
+                    <div class="flex gap-0.5">
+                      <button
+                        v-for="n in 5"
+                        :key="n"
+                        type="button"
+                        @click="calificacionForm[p.id] = n"
                         class="transition-transform duration-150 hover:scale-125 focus:outline-none"
-                        :title="n + (n === 1 ? ' estrella' : ' estrellas')">
-                        <svg class="w-6 h-6" aria-hidden="true"
+                        :title="n + (n === 1 ? ' estrella' : ' estrellas')"
+                      >
+                        <svg
+                          class="w-6 h-6"
                           :class="n <= (calificacionForm[p.id] || 5) ? 'text-acento' : 'text-slate-300'"
-                          viewBox="0 0 20 20" fill="currentColor">
+                          viewBox="0 0 20 20"
+                          fill="currentColor"
+                        >
                           <path :d="iconos.estrella" />
                         </svg>
                       </button>
@@ -894,11 +1090,17 @@ const marcarNotificacionesLeidas = () => {
                   </div>
 
                   <div class="flex flex-col sm:flex-row gap-2">
-                    <input v-model="comentarioForm[p.id]" type="text" maxlength="1000"
-                      :aria-label="'Comentario de la reseña del pedido ' + p.id"
-                      placeholder="Escribe una opinión sobre el trabajo realizado (opcional)..." :class="claseInput" />
-                    <button type="submit"
-                      class="shrink-0 px-5 py-2 bg-principal hover:bg-slate-800 text-white text-xs font-bold rounded-xl shadow-md transition active:scale-95">
+                    <input
+                      v-model="comentarioForm[p.id]"
+                      type="text"
+                      maxlength="1000"
+                      placeholder="Escribe una opinión sobre el trabajo realizado (opcional)..."
+                      :class="claseInput"
+                    />
+                    <button
+                      type="submit"
+                      class="shrink-0 px-5 py-2 bg-principal hover:bg-slate-800 text-white text-xs font-bold rounded-xl shadow-md transition active:scale-95"
+                    >
                       Enviar calificación
                     </button>
                   </div>
@@ -912,16 +1114,22 @@ const marcarNotificacionesLeidas = () => {
       <!-- =====================================================
            MODAL PARA SOLICITAR SERVICIO CON DIRECCIÓN
            ===================================================== -->
-      <Transition enter-active-class="transition duration-200 ease-out" enter-from-class="opacity-0"
-        enter-to-class="opacity-100" leave-active-class="transition duration-150 ease-in" leave-from-class="opacity-100"
-        leave-to-class="opacity-0">
-        <div v-if="servicioASolicitar && !esPrestadorUser"
+      <Transition
+        enter-active-class="transition duration-200 ease-out"
+        enter-from-class="opacity-0"
+        enter-to-class="opacity-100"
+        leave-active-class="transition duration-150 ease-in"
+        leave-from-class="opacity-100"
+        leave-to-class="opacity-0"
+      >
+        <div
+          v-if="servicioASolicitar && !esPrestadorUser"
           class="fixed inset-0 bg-principal/60 backdrop-blur-sm flex items-center justify-center p-4 z-50"
-          @click.self="cerrarModal">
+          @click.self="cerrarModal"
+        >
           <div class="bg-white rounded-3xl border-2 border-slate-200/90 max-w-md w-full p-7 space-y-5 shadow-2xl">
             <div class="flex items-start gap-3">
-              <div
-                class="w-12 h-12 shrink-0 rounded-2xl bg-niebla border border-principal/15 text-principal flex items-center justify-center">
+              <div class="w-12 h-12 shrink-0 rounded-2xl bg-niebla border border-principal/15 text-principal flex items-center justify-center">
                 <svg class="w-6 h-6" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" :d="iconos.pedidos" />
                 </svg>
@@ -929,8 +1137,7 @@ const marcarNotificacionesLeidas = () => {
               <div class="min-w-0">
                 <h3 class="text-lg font-extrabold text-principal tracking-tight">Solicitar servicio</h3>
                 <p class="text-sm text-gris-medio truncate">{{ servicioASolicitar.titulo }}</p>
-                <span
-                  class="inline-block mt-2 text-xs font-extrabold text-principal bg-acento/20 border border-acento/50 px-3 py-1 rounded-full">
+                <span class="inline-block mt-2 text-xs font-extrabold text-principal bg-acento/20 border border-acento/50 px-3 py-1 rounded-full">
                   Precio estimado: ${{ precioDe(servicioASolicitar) }}
                 </span>
               </div>
@@ -938,34 +1145,124 @@ const marcarNotificacionesLeidas = () => {
 
             <form @submit.prevent="solicitarServicioSubmit" class="space-y-4">
               <div>
-                <label for="pedido-direccion" :class="claseLabel">Dirección del servicio</label>
-                <input id="pedido-direccion" v-model="formPedido.direccion_servicio" type="text" required
-                  maxlength="255" placeholder="Ej: Calle Principal 123, Depto 4B" :class="claseInput" />
-                <span v-if="formPedido.errors.direccion_servicio"
-                  class="block mt-1 text-xs font-semibold text-red-600">{{ formPedido.errors.direccion_servicio
-                  }}</span>
+                <label :class="claseLabel">Dirección del servicio</label>
+                <input
+                  v-model="formPedido.direccion_servicio"
+                  type="text"
+                  required
+                  maxlength="255"
+                  placeholder="Ej: Calle Principal 123, Depto 4B"
+                  :class="claseInput"
+                />
+                <span v-if="formPedido.errors.direccion_servicio" class="block mt-1 text-xs font-semibold text-red-600">{{ formPedido.errors.direccion_servicio }}</span>
               </div>
 
               <div>
-                <label for="pedido-fecha" :class="claseLabel">Fecha preferida (opcional)</label>
-                <input id="pedido-fecha" v-model="formPedido.fecha_deseada" type="date" :min="hoy"
-                  :class="claseInput" />
-                <span v-if="formPedido.errors.fecha_deseada" class="block mt-1 text-xs font-semibold text-red-600">{{
-                  formPedido.errors.fecha_deseada }}</span>
+                <label :class="claseLabel">Fecha preferida (opcional)</label>
+                <input
+                  v-model="formPedido.fecha_deseada"
+                  type="date"
+                  :min="hoy"
+                  :class="claseInput"
+                />
+                <span v-if="formPedido.errors.fecha_deseada" class="block mt-1 text-xs font-semibold text-red-600">{{ formPedido.errors.fecha_deseada }}</span>
               </div>
 
-              <span v-if="formPedido.errors.servicio_id" class="block text-xs font-semibold text-red-600">{{
-                formPedido.errors.servicio_id }}</span>
+              <span v-if="formPedido.errors.servicio_id" class="block text-xs font-semibold text-red-600">{{ formPedido.errors.servicio_id }}</span>
 
               <div class="flex gap-3 pt-2">
-                <button type="button" @click="cerrarModal"
-                  class="flex-1 py-2.5 bg-white hover:bg-slate-50 text-grafito text-sm font-bold rounded-xl border-2 border-slate-200 transition active:scale-95">
+                <button
+                  type="button"
+                  @click="cerrarModal"
+                  class="flex-1 py-2.5 bg-white hover:bg-slate-50 text-grafito text-sm font-bold rounded-xl border-2 border-slate-200 transition active:scale-95"
+                >
                   Cancelar
                 </button>
-                <button type="submit" :disabled="formPedido.processing"
+                <button
+                  type="submit"
+                  :disabled="formPedido.processing"
                   class="flex-1 py-2.5 bg-principal hover:bg-slate-800 text-white text-sm font-bold rounded-xl shadow-md transition active:scale-95"
-                  :class="{ 'opacity-50 cursor-not-allowed': formPedido.processing }">
+                  :class="{ 'opacity-50 cursor-not-allowed': formPedido.processing }"
+                >
                   Confirmar solicitud
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </Transition>
+
+      <!-- =====================================================
+           MODAL PARA REPORTAR UN PROBLEMA (DISPUTA, RF-38)
+           ===================================================== -->
+      <Transition
+        enter-active-class="transition duration-200 ease-out"
+        enter-from-class="opacity-0"
+        enter-to-class="opacity-100"
+        leave-active-class="transition duration-150 ease-in"
+        leave-from-class="opacity-100"
+        leave-to-class="opacity-0"
+      >
+        <div
+          v-if="pedidoADisputar && !esPrestadorUser"
+          class="fixed inset-0 bg-principal/60 backdrop-blur-sm flex items-center justify-center p-4 z-50"
+          role="dialog"
+          aria-modal="true"
+          @click.self="cerrarModalDisputa"
+        >
+          <div class="bg-white rounded-3xl border-2 border-slate-200/90 max-w-md w-full p-7 space-y-5 shadow-2xl">
+            <div class="flex items-start gap-3">
+              <div class="w-12 h-12 shrink-0 rounded-2xl bg-orange-100 border border-orange-200 text-orange-600 flex items-center justify-center">
+                <svg class="w-6 h-6" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" :d="iconos.alerta" />
+                </svg>
+              </div>
+              <div class="min-w-0">
+                <h3 class="text-lg font-extrabold text-principal tracking-tight">Reportar un problema</h3>
+                <p class="text-sm text-gris-medio truncate">{{ pedidoADisputar.servicio?.titulo || ('Pedido #' + pedidoADisputar.id) }}</p>
+              </div>
+            </div>
+
+            <p class="text-xs text-grafito leading-relaxed">
+              Tu pago seguirá retenido y un mediador revisará las fotos de ambas partes.
+              Si tienes fotos del problema, súbelas desde “Fotos del trabajo” antes o después de enviar.
+            </p>
+
+            <form @submit.prevent="enviarDisputa" class="space-y-4">
+              <div>
+                <label for="motivo-disputa" :class="claseLabel">¿Qué pasó?</label>
+                <textarea
+                  id="motivo-disputa"
+                  v-model="formDisputa.motivo"
+                  rows="5"
+                  required
+                  maxlength="1500"
+                  placeholder="Describe el problema con el trabajo (mínimo 20 caracteres)."
+                  :class="claseInput"
+                ></textarea>
+                <div class="mt-1 flex items-center justify-between gap-2">
+                  <span class="text-xs font-semibold text-red-600">
+                    {{ formDisputa.errors.motivo || formDisputa.errors.pedido_id }}
+                  </span>
+                  <span class="text-[11px] text-gris-medio">{{ formDisputa.motivo.trim().length }}/1500</span>
+                </div>
+              </div>
+
+              <div class="flex gap-3 pt-2">
+                <button
+                  type="button"
+                  @click="cerrarModalDisputa"
+                  class="flex-1 py-2.5 bg-white hover:bg-slate-50 text-grafito text-sm font-bold rounded-xl border-2 border-slate-200 transition active:scale-95"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  :disabled="formDisputa.processing || formDisputa.motivo.trim().length < MIN_MOTIVO"
+                  class="flex-1 py-2.5 bg-orange-600 hover:bg-orange-700 text-white text-sm font-bold rounded-xl shadow-md transition active:scale-95"
+                  :class="{ 'opacity-50 cursor-not-allowed': formDisputa.processing || formDisputa.motivo.trim().length < MIN_MOTIVO }"
+                >
+                  Abrir disputa
                 </button>
               </div>
             </form>

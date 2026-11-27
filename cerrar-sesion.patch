@@ -1,0 +1,110 @@
+diff --git a/app/Http/Controllers/Auth/AuthenticatedSessionController.php b/app/Http/Controllers/Auth/AuthenticatedSessionController.php
+index d44fe97..175776c 100644
+--- a/app/Http/Controllers/Auth/AuthenticatedSessionController.php
++++ b/app/Http/Controllers/Auth/AuthenticatedSessionController.php
+@@ -47,6 +47,9 @@ public function destroy(Request $request): RedirectResponse
+ 
+         $request->session()->regenerateToken();
+ 
++        // Borra del navegador el historial cifrado de la sesión que acaba de cerrarse.
++        Inertia::clearHistory();
++
+         return redirect('/');
+     }
+ }
+diff --git a/app/Http/Middleware/EvitarCacheAutenticado.php b/app/Http/Middleware/EvitarCacheAutenticado.php
+new file mode 100644
+index 0000000..e42e4b9
+--- /dev/null
++++ b/app/Http/Middleware/EvitarCacheAutenticado.php
+@@ -0,0 +1,29 @@
++<?php
++
++namespace App\Http\Middleware;
++
++use Closure;
++use Illuminate\Http\Request;
++use Symfony\Component\HttpFoundation\Response;
++
++/**
++ * Las páginas de una sesión iniciada no deben quedar en la caché del navegador ni en su
++ * caché de "atrás/adelante" (bfcache): si se guardaran, el botón Atrás las mostraría
++ * después de cerrar sesión. Con no-store el navegador vuelve a pedirlas al servidor,
++ * y ahí el middleware `auth` redirige al login.
++ */
++class EvitarCacheAutenticado
++{
++    public function handle(Request $request, Closure $next): Response
++    {
++        $respuesta = $next($request);
++
++        if ($request->user() !== null) {
++            $respuesta->headers->set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
++            $respuesta->headers->set('Pragma', 'no-cache');
++            $respuesta->headers->set('Expires', '0');
++        }
++
++        return $respuesta;
++    }
++}
+diff --git a/app/Http/Middleware/HandleInertiaRequests.php b/app/Http/Middleware/HandleInertiaRequests.php
+index 3d75ea9..3cbaf7d 100644
+--- a/app/Http/Middleware/HandleInertiaRequests.php
++++ b/app/Http/Middleware/HandleInertiaRequests.php
+@@ -2,13 +2,27 @@
+ 
+ namespace App\Http\Middleware;
+ 
++use Closure;
+ use Illuminate\Http\Request;
++use Inertia\Inertia;
+ use Inertia\Middleware;
+ 
+ class HandleInertiaRequests extends Middleware
+ {
+     protected $rootView = 'app';
+ 
++    /**
++     * Con sesión iniciada, Inertia cifra el historial del navegador (las props de cada
++     * página). Al cerrar sesión se invalida la clave (Inertia::clearHistory en el logout),
++     * así que el botón Atrás ya no puede mostrar páginas privadas.
++     */
++    public function handle(Request $request, Closure $next)
++    {
++        Inertia::encryptHistory($request->user() !== null);
++
++        return parent::handle($request, $next);
++    }
++
+     public function version(Request $request): ?string
+     {
+         return parent::version($request);
+diff --git a/bootstrap/app.php b/bootstrap/app.php
+index 74e8e64..c0207c8 100644
+--- a/bootstrap/app.php
++++ b/bootstrap/app.php
+@@ -17,6 +17,7 @@
+         $middleware->trustProxies(at: '*');
+         $middleware->web(append: [
+             \App\Http\Middleware\HandleInertiaRequests::class,
++            \App\Http\Middleware\EvitarCacheAutenticado::class,
+             \Illuminate\Http\Middleware\AddLinkHeadersForPreloadedAssets::class,
+         ]);
+ 
+diff --git a/resources/js/app.js b/resources/js/app.js
+index c201586..55a6a9e 100644
+--- a/resources/js/app.js
++++ b/resources/js/app.js
+@@ -23,6 +23,12 @@ createInertiaApp({
+         // Inicializar Service Worker
+         iniciarPwa();
+ 
++        // Si el navegador restaura una página desde su caché de atrás/adelante (bfcache),
++        // se recarga para que el servidor decida si todavía hay sesión.
++        window.addEventListener('pageshow', (evento) => {
++            if (evento.persisted) window.location.reload();
++        });
++
+         // Datos locales (IndexedDB): ligados al usuario y borrados al cerrar sesión.
+         let ultimoUsuario = null;
+         const alCambiarUsuario = (id) => {

@@ -17,10 +17,14 @@ class EstadoPedidoActualizado extends Notification
     public $pedido;
     public $nuevoEstado;
 
-    public function __construct($pedido, $nuevoEstado)
+    /** Frase breve y sin datos sensibles que acompaña al aviso (p. ej. el resultado de una disputa). */
+    public $detalle;
+
+    public function __construct($pedido, $nuevoEstado, $detalle = null)
     {
         $this->pedido = $pedido;
         $this->nuevoEstado = $nuevoEstado;
+        $this->detalle = $detalle;
     }
 
     // 'database' guarda en la tabla 'notifications'; Web Push avisa al dispositivo
@@ -52,6 +56,10 @@ class EstadoPedidoActualizado extends Notification
             ? "Tienes una nueva solicitud de servicio (#{$this->pedido->id})."
             : "Tu pedido #{$this->pedido->id} ahora está: {$this->nuevoEstado}.";
 
+        if (filled($this->detalle)) {
+            $cuerpo .= ' '.$this->detalle;
+        }
+
         return [
             'titulo' => 'Actualización de pedido',
             'cuerpo' => $cuerpo,
@@ -76,6 +84,10 @@ class EstadoPedidoActualizado extends Notification
             ? "Tienes una nueva solicitud de servicio (pedido #{$id})."
             : "Tu pedido #{$id} ahora está: {$estado}.";
 
+        if (filled($this->detalle)) {
+            $mensaje .= ' '.e($this->detalle);
+        }
+
         $html = "<div style=\"font-family:Arial,sans-serif;max-width:480px;margin:auto;color:#1f2937\">"
             ."<h2 style=\"color:#14305D\">OficiosYa</h2>"
             ."<p>Hola, {$nombre}.</p>"
@@ -96,7 +108,8 @@ class EstadoPedidoActualizado extends Notification
     {
         return [
             'titulo'    => 'Actualización de Pedido',
-            'mensaje'   => "Tu pedido #{$this->pedido->id} ha cambiado al estado: '{$this->nuevoEstado}'.",
+            'mensaje'   => "Tu pedido #{$this->pedido->id} ha cambiado al estado: '{$this->nuevoEstado}'."
+                .(filled($this->detalle) ? ' '.$this->detalle : ''),
             'pedido_id' => $this->pedido->id,
             'estado'    => $this->nuevoEstado,
         ];

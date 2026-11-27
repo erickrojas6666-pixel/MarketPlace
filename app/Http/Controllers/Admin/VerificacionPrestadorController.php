@@ -50,7 +50,7 @@ class VerificacionPrestadorController extends Controller
      * Nunca se envía latitud/longitud: solo la ubicación aproximada en texto
      * y el radio de cobertura (misma regla que en el perfil público).
      */
-    public function show(PerfilPrestador $perfil): Response
+    public function show(Request $request, PerfilPrestador $perfil): Response
     {
         $perfil->load([
             'user:id,nombre,email',
@@ -85,6 +85,8 @@ class VerificacionPrestadorController extends Controller
                 'ubicacion_aproximada' => $perfil->ubicacion_aproximada,
                 'radio_cobertura_km'   => $perfil->radio_cobertura_km,
                 'estado_verificacion'  => $perfil->estado_verificacion,
+                'en_revision'          => $perfil->enRevision(),
+                'motivo_rechazo'       => $perfil->motivo_rechazo,
                 'created_at'           => $perfil->created_at,
             ],
             'usuario' => [
@@ -104,6 +106,21 @@ class VerificacionPrestadorController extends Controller
                 'promedio' => $resenas?->promedio !== null ? round((float) $resenas->promedio, 1) : null,
                 'total'    => (int) ($resenas?->total ?? 0),
             ],
+            // RF-07: documentos para revisar. Nunca viaja la ruta; se leen por admin.documentos.ver.
+            'documentos' => $perfil->documentos()->orderBy('tipo')->get()->map(fn ($d) => [
+                'id'          => $d->id,
+                'tipo'        => $d->tipo,
+                'estado'      => $d->estado,
+                'motivo'      => $d->motivo,
+                'purgado'     => $d->purgado_at !== null,
+                'actualizado' => $d->updated_at,
+            ])->values(),
+            'tiposRequeridos' => config('marketplace.verificacion.tipos_requeridos'),
+            'acceso' => (function () use ($request, $perfil) {
+                $acceso = DocumentoVerificacionController::accesoVigente($request, $perfil->id);
+
+                return ['activo' => $acceso !== null, 'motivo' => $acceso['motivo'] ?? null, 'hasta' => $acceso['hasta'] ?? null];
+            })(),
         ]);
     }
 
@@ -114,6 +131,14 @@ class VerificacionPrestadorController extends Controller
     {
         $request->validate([
             'estado' => ['required', 'string', Rule::in(['aprobado', 'verificado', 'rechazado', 'pendiente'])],
+            // RF-06: un rechazo siempre lleva motivo, y el prestador lo ve.
+            'motivo' => [
+                Rule::requiredIf(fn () => $request->input('estado') === 'rechazado'),
+                'nullable', 'string', 'min:10', 'max:500',
+            ],
+        ], [
+            'motivo.required' => 'Indica el motivo del rechazo: el prestador lo verá para corregirlo.',
+            'motivo.min'      => 'Explica el motivo con al menos 10 caracteres.',
         ]);
 
         // Mapeo defensivo: el frontend envía 'aprobado', pero la BD MySQL espera 'verificado'
@@ -129,21 +154,48 @@ class VerificacionPrestadorController extends Controller
             return redirect()->back()->with('error', 'Estado de verificación no válido.');
         }
 
+        // RF-05/08: no se aprueba a quien no entregó (o tiene rechazados) INE y comprobante.
+        if ($nuevoEstado === 'verificado' && config('marketplace.verificacion.exigir_documentos')) {
+            $docs = $perfil->documentos()->get()->keyBy('tipo');
+
+            foreach (config('marketplace.verificacion.tipos_requeridos') as $tipo) {
+                $d = $docs->get($tipo);
+
+                if (! $d || $d->estado === 'rechazado') {
+                    return redirect()->back()->with('error', 'No se puede aprobar: faltan documentos de identidad o hay alguno rechazado.');
+                }
+            }
+        }
+
         // Actualizar ÚNICAMENTE la columna que existe en la BD
         // RF-52: el cambio y su rastro van juntos o no van.
-        DB::transaction(function () use ($perfil, $nuevoEstado) {
+        DB::transaction(function () use ($perfil, $nuevoEstado, $request) {
             $anterior = $perfil->estado_verificacion;
 
-            $perfil->update([
-                'estado_verificacion' => $nuevoEstado,
-            ]);
+            $cambios = ['estado_verificacion' => $nuevoEstado];
+
+            if ($nuevoEstado === 'rechazado') {
+                $cambios['motivo_rechazo'] = $request->input('motivo');
+            } elseif ($nuevoEstado === 'verificado') {
+                $cambios['motivo_rechazo'] = null;
+            }
+
+            $perfil->update($cambios);
+
+            if ($nuevoEstado === 'verificado') {
+                // Al aprobar al prestador, los documentos pendientes quedan como válidos.
+                $perfil->documentos()->where('estado', 'pendiente')->update([
+                    'estado'       => 'valido',
+                    'revisado_por' => $request->user()->id,
+                ]);
+            }
 
             Auditoria::registrar(
                 'prestador.verificacion_cambiada',
                 'perfil_prestador',
                 $perfil->id,
                 ['estado_verificacion' => $anterior],
-                ['estado_verificacion' => $nuevoEstado],
+                ['estado_verificacion' => $nuevoEstado, 'motivo' => $request->input('motivo')],
             );
         });
 

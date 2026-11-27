@@ -10,25 +10,83 @@ const props = defineProps({
   pedidosPorEstado: { type: Object, default: () => ({}) },
   totalPedidos: { type: Number, default: 0 },
   resenas: { type: Object, default: () => ({ promedio: null, total: 0 }) },
+  documentos: { type: Array, default: () => [] },
+  tiposRequeridos: { type: Array, default: () => [] },
+  acceso: { type: Object, default: () => ({ activo: false, motivo: null, hasta: null }) },
 })
+
+/* ---------- Documentos de identidad (RF-07): motivo para ver, y revisión por documento ---------- */
+const ETIQUETA_DOC = {
+  ine_frente: 'INE (frente)',
+  ine_reverso: 'INE (reverso)',
+  comprobante_domicilio: 'Comprobante de domicilio',
+  referencia_personal: 'Referencia personal',
+  antecedentes: 'Antecedentes',
+}
+const motivoAcceso = ref('')
+const errorAcceso = ref('')
+const rechazandoDoc = ref(null)
+const motivoDoc = ref('')
+const errorDoc = ref('')
+
+const autorizarAcceso = () => {
+  errorAcceso.value = ''
+  router.post(route('admin.documentos.acceso', props.perfil.id), { motivo: motivoAcceso.value }, {
+    preserveScroll: true,
+    onSuccess: () => (motivoAcceso.value = ''),
+    onError: (e) => (errorAcceso.value = e.motivo || 'No se pudo autorizar el acceso.'),
+  })
+}
+
+const marcarValido = (doc) =>
+  router.patch(route('admin.documentos.revisar', doc.id), { estado: 'valido' }, { preserveScroll: true })
+
+const confirmarRechazoDoc = (doc) => {
+  errorDoc.value = ''
+  router.patch(route('admin.documentos.revisar', doc.id), { estado: 'rechazado', motivo: motivoDoc.value }, {
+    preserveScroll: true,
+    onSuccess: () => {
+      rechazandoDoc.value = null
+      motivoDoc.value = ''
+    },
+    onError: (e) => (errorDoc.value = e.motivo || 'No se pudo rechazar el documento.'),
+  })
+}
+
+const faltantes = computed(() =>
+  props.tiposRequeridos.filter((t) => !props.documentos.some((d) => d.tipo === t)),
+)
+const horaHasta = computed(() =>
+  props.acceso.hasta ? new Date(props.acceso.hasta * 1000).toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' }) : '',
+)
+const claseEstadoDoc = (e) =>
+  e === 'valido' ? 'bg-green-50 text-green-700 border-green-200'
+    : e === 'rechazado' ? 'bg-red-50 text-red-700 border-red-200'
+      : 'bg-amber-50 text-amber-700 border-amber-200'
 
 /* ---------- Aprobar / rechazar (misma lógica que la tabla de prestadores) ---------- */
 const mostrarModal = ref(false)
 const accionVerificacion = ref('')
+const motivoVerificacion = ref('')
+const errorMotivo = ref('')
 
 const abrirModal = (accion) => {
   accionVerificacion.value = accion
+  motivoVerificacion.value = ''
+  errorMotivo.value = ''
   mostrarModal.value = true
 }
 
 const procesarVerificacion = () => {
   router.patch(route('admin.prestadores.updateStatus', props.perfil.id), {
     estado: accionVerificacion.value,
+    motivo: accionVerificacion.value === 'rechazado' ? motivoVerificacion.value : null,
   }, {
     preserveScroll: true,
     onSuccess: () => {
       mostrarModal.value = false
     },
+    onError: (e) => (errorMotivo.value = e.motivo || ''),
   })
 }
 
@@ -279,6 +337,88 @@ const iconos = {
             </p>
           </section>
 
+          <!-- Documentos de identidad -->
+          <section class="bg-white rounded-3xl p-6 sm:p-8 border-2 border-slate-200/90 shadow-md space-y-5">
+            <div>
+              <h2 class="font-extrabold text-lg text-principal tracking-tight">Documentos de identidad</h2>
+              <p class="text-xs text-gris-medio mt-0.5">
+                Información de alto riesgo. Para verla debes declarar el motivo; cada consulta queda registrada en la auditoría.
+              </p>
+            </div>
+
+            <p v-if="perfil.motivo_rechazo && estado === 'rechazado'" class="px-3 py-2 rounded-xl bg-red-50 border border-red-200 text-xs text-red-700">
+              <strong>Motivo del rechazo anterior:</strong> {{ perfil.motivo_rechazo }}
+            </p>
+
+            <p v-if="faltantes.length" class="px-3 py-2 rounded-xl bg-amber-50 border border-amber-200 text-xs font-semibold text-amber-800">
+              Faltan: {{ faltantes.map((t) => ETIQUETA_DOC[t] || t).join(', ') }}.
+            </p>
+
+            <p v-if="!documentos.length" class="text-sm text-gris-medio">Este prestador todavía no ha subido documentos.</p>
+
+            <template v-else>
+              <!-- Sin autorización vigente: se pide el motivo -->
+              <div v-if="!acceso.activo" class="space-y-2">
+                <label for="motivo-acceso" class="text-xs font-bold text-principal">Motivo de la revisión</label>
+                <div class="flex flex-col sm:flex-row gap-2">
+                  <input
+                    id="motivo-acceso"
+                    v-model="motivoAcceso"
+                    type="text"
+                    maxlength="200"
+                    placeholder="Ej.: Verificación inicial de identidad"
+                    class="flex-1 rounded-xl border-slate-300 focus:border-principal focus:ring-principal text-sm"
+                    @keyup.enter="autorizarAcceso"
+                  />
+                  <button type="button" class="px-4 py-2 bg-principal hover:bg-slate-800 text-white text-sm font-bold rounded-xl active:scale-95" @click="autorizarAcceso">
+                    Ver documentos
+                  </button>
+                </div>
+                <p v-if="errorAcceso" class="text-xs font-semibold text-red-600" role="alert">{{ errorAcceso }}</p>
+              </div>
+
+              <p v-else class="text-xs text-gris-medio">
+                Acceso autorizado hasta las <strong class="text-principal">{{ horaHasta }}</strong>
+                · Motivo: <em>{{ acceso.motivo }}</em>
+              </p>
+
+              <ul class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <li v-for="d in documentos" :key="d.id" class="rounded-2xl border border-slate-200 overflow-hidden bg-white">
+                  <div class="aspect-[4/3] bg-niebla flex items-center justify-center">
+                    <a v-if="acceso.activo && !d.purgado" :href="route('admin.documentos.ver', d.id)" target="_blank" rel="noopener" class="block w-full h-full">
+                      <img :src="route('admin.documentos.ver', d.id)" :alt="ETIQUETA_DOC[d.tipo] || d.tipo" class="w-full h-full object-contain" />
+                    </a>
+                    <span v-else-if="d.purgado" class="text-xs text-gris-medio px-4 text-center">Eliminado por política de retención</span>
+                    <span v-else class="text-xs text-gris-medio px-4 text-center">Declara el motivo para ver el documento</span>
+                  </div>
+
+                  <div class="p-3 space-y-2">
+                    <div class="flex items-center justify-between gap-2">
+                      <span class="text-sm font-bold text-principal">{{ ETIQUETA_DOC[d.tipo] || d.tipo }}</span>
+                      <span class="px-2 py-0.5 rounded-full border text-[10px] font-bold uppercase tracking-wider" :class="claseEstadoDoc(d.estado)">{{ d.estado }}</span>
+                    </div>
+                    <p v-if="d.motivo" class="text-xs text-red-700">Motivo: {{ d.motivo }}</p>
+
+                    <div v-if="!d.purgado && estado !== 'verificado'" class="space-y-2">
+                      <div v-if="rechazandoDoc === d.id" class="space-y-1.5">
+                        <input v-model="motivoDoc" type="text" maxlength="255" placeholder="Motivo (lo verá el prestador)" class="block w-full rounded-lg border-slate-300 text-xs py-1.5 px-2" />
+                        <p v-if="errorDoc" class="text-[11px] font-semibold text-red-600" role="alert">{{ errorDoc }}</p>
+                        <div class="flex gap-2">
+                          <button type="button" class="text-[11px] font-bold text-white bg-red-600 hover:bg-red-700 px-2.5 py-1 rounded-lg" @click="confirmarRechazoDoc(d)">Confirmar rechazo</button>
+                          <button type="button" class="text-[11px] font-bold text-gris-medio" @click="rechazandoDoc = null">Cancelar</button>
+                        </div>
+                      </div>
+                      <div v-else class="flex gap-2">
+                        <button type="button" class="text-[11px] font-bold text-green-700 hover:underline" @click="marcarValido(d)">Marcar válido</button>
+                        <button type="button" class="text-[11px] font-bold text-red-600 hover:underline" @click="rechazandoDoc = d.id; motivoDoc = ''; errorDoc = ''">Rechazar</button>
+                      </div>
+                    </div>
+                  </div>
+                </li>
+              </ul>
+            </template>
+          </section>
+
           <!-- Servicios publicados -->
           <section class="bg-white rounded-3xl p-6 sm:p-8 border-2 border-slate-200/90 shadow-md space-y-5">
             <div class="flex items-center justify-between gap-4">
@@ -432,6 +572,19 @@ const iconos = {
                 ¿Confirmas que quieres {{ esAprobacion ? 'aprobar' : 'rechazar' }} a
                 <strong class="text-principal">{{ nombre }}</strong>?
               </p>
+            </div>
+
+            <div v-if="!esAprobacion" class="text-left space-y-1.5">
+              <label for="motivo-rechazo" class="text-xs font-bold text-principal">Motivo del rechazo (lo verá el prestador)</label>
+              <textarea
+                id="motivo-rechazo"
+                v-model="motivoVerificacion"
+                rows="3"
+                maxlength="500"
+                class="block w-full rounded-xl border-slate-300 focus:border-principal focus:ring-principal text-sm"
+                placeholder="Ej.: La foto de la INE está borrosa; sube una nueva con buena luz."
+              ></textarea>
+              <p v-if="errorMotivo" class="text-xs font-semibold text-red-600" role="alert">{{ errorMotivo }}</p>
             </div>
 
             <div class="flex gap-3 pt-2">
