@@ -21,3 +21,9 @@ Schedule::command('verificacion:purgar-documentos')
     ->dailyAt('03:30')
     ->withoutOverlapping()
     ->onOneServer();
+
+// Retención de datos personales: borra las conversaciones de pedidos terminados tras el plazo.
+Schedule::command('chat:purgar-mensajes')
+    ->dailyAt('03:45')
+    ->withoutOverlapping()
+    ->onOneServer();

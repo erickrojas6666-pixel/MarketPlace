@@ -10,6 +10,7 @@ use App\Http\Controllers\FotoEvidenciaController;
 use App\Http\Controllers\FotoPerfilController;
 use App\Http\Controllers\FotoTrabajoController;
 use App\Http\Controllers\Mediacion\DisputaController;
+use App\Http\Controllers\MensajeController;
 use App\Http\Controllers\PedidoController;
 use App\Http\Controllers\PedidoDisputaController;
 use App\Http\Controllers\PagoRetornoController;
@@ -123,6 +124,24 @@ Route::middleware('auth')->group(function () {
     Route::delete('/evidencias/{foto}', [FotoEvidenciaController::class, 'destroy'])
         ->whereNumber('foto')
         ->name('evidencias.destroy');
+
+    // Chat del pedido (RF-22): solo cliente y prestador. Se recibe por Web Push (el cliente consulta al avisarle el Service Worker); la cola offline
+    // reenvía con Idempotency-Key lo escrito sin conexión.
+    Route::get('/pedidos/{pedido}/mensajes', [MensajeController::class, 'index'])
+        ->whereNumber('pedido')
+        ->middleware('throttle:90,1')
+        ->name('mensajes.index');
+    Route::post('/pedidos/{pedido}/mensajes', [MensajeController::class, 'store'])
+        ->whereNumber('pedido')
+        ->middleware('throttle:30,1')
+        ->name('mensajes.store');
+    Route::post('/pedidos/{pedido}/mensajes/leidos', [MensajeController::class, 'leidos'])
+        ->whereNumber('pedido')
+        ->middleware('throttle:60,1')
+        ->name('mensajes.leidos');
+    Route::get('/chat/no-leidos', [MensajeController::class, 'noLeidos'])
+        ->middleware('throttle:30,1')
+        ->name('chat.noLeidos');
 
     // Gestión de Pedidos y Estado
     Route::post('/pedidos', [PedidoController::class, 'store'])->name('pedidos.store');

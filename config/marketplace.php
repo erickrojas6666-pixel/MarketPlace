@@ -42,6 +42,12 @@ return [
         'minutos_acceso_revisor' => 15,
     ],
 
+    // Chat del pedido (RF-22). Ver docs/CHAT.md.
+    'chat' => [
+        'max_caracteres' => (int) env('CHAT_MAX_CARACTERES', 1000),
+        'retencion_dias' => (int) env('CHAT_RETENCION_DIAS', 180), // tras terminar el pedido
+    ],
+
     // Interruptores de módulos (ver TransicionesPedido::mapa()).
     'cotizaciones_habilitadas' => (bool) env('MARKETPLACE_COTIZACIONES', false),
     'escrow_habilitado'        => (bool) env('MARKETPLACE_ESCROW', false),

@@ -114,13 +114,18 @@ async function pedirBackgroundSync() {
 
 /**
  * Guarda una acción para enviarla después.
- * @param {{ tipo: string, url: string, metodo?: string, datos?: object, descripcion?: string }} accion
+ *
+ * `uuid` es opcional: si la acción ya se intentó enviar con una Idempotency-Key (p. ej. el
+ * chat, cuando la respuesta se perdió), hay que reutilizar ESA clave para que el servidor
+ * reconozca el reintento y no la duplique.
+ *
+ * @param {{ tipo: string, url: string, metodo?: string, datos?: object, descripcion?: string, uuid?: string }} accion
  */
-export async function encolar({ tipo, url, metodo = 'post', datos = {}, descripcion = '' }) {
+export async function encolar({ tipo, url, metodo = 'post', datos = {}, descripcion = '', uuid }) {
     if (usuarioActual == null) return false;
 
     await guardar('cola', {
-        uuid: nuevoUuid(),
+        uuid: uuid ?? nuevoUuid(),
         usuarioId: usuarioActual,
         tipo,
         url,
@@ -134,6 +139,15 @@ export async function encolar({ tipo, url, metodo = 'post', datos = {}, descripc
     await contarPendientes();
     pedirBackgroundSync();
     return true;
+}
+
+/** Acciones aún pendientes de este usuario de un tipo, en orden de envío (p. ej. mensajes sin enviar). */
+export async function accionesPendientes(tipo) {
+    if (usuarioActual == null) return [];
+
+    return (await todos('cola'))
+        .filter((a) => a.usuarioId === usuarioActual && a.tipo === tipo)
+        .sort((a, b) => a.id - b.id);
 }
 
 /** Envía la cola en orden. Seguro de llamar varias veces (candado entre pestañas). */

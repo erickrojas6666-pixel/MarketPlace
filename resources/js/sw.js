@@ -40,6 +40,10 @@ function urlSegura(url) {
     }
 }
 
+// WebKit (Safari / iPhone) exige mostrar una notificación en CADA push y revoca el permiso si no;
+// Chrome y Firefox permiten no mostrarla cuando la app está a la vista.
+const esWebKit = /^((?!chrome|android|crios|fxios|edg).)*safari/i.test(self.navigator.userAgent);
+
 self.addEventListener('push', (event) => {
     let datos = {};
     try {
@@ -49,14 +53,32 @@ self.addEventListener('push', (event) => {
     }
 
     event.waitUntil(
-        self.registration.showNotification(String(datos.titulo || 'OficiosYa').slice(0, 80), {
-            body: String(datos.cuerpo || 'Tienes una novedad en tu cuenta.').slice(0, 200),
-            icon: '/icons/icon-192x192.png',
-            badge: '/icons/icon-192x192.png',
-            tag: typeof datos.tag === 'string' ? datos.tag : undefined,
-            lang: 'es-MX',
-            data: { url: urlSegura(datos.url) },
-        }),
+        (async () => {
+            const esChat = datos.tipo === 'chat' && Number.isInteger(datos.pedido_id);
+
+            if (esChat) {
+                // Mensaje nuevo: las ventanas abiertas consultan solo lo nuevo, en este momento.
+                // Así el chat no necesita preguntarle al servidor cada pocos segundos.
+                const ventanas = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+                ventanas.forEach((v) => v.postMessage({ tipo: 'chat:nuevo', pedidoId: datos.pedido_id }));
+
+                // Si la app está a la vista ya lo está viendo: no se muestra la notificación.
+                if (!esWebKit && ventanas.some((v) => v.visibilityState === 'visible' && v.focused)) return;
+            }
+
+            const conTag = typeof datos.tag === 'string';
+
+            await self.registration.showNotification(String(datos.titulo || 'OficiosYa').slice(0, 80), {
+                body: String(datos.cuerpo || 'Tienes una novedad en tu cuenta.').slice(0, 200),
+                icon: '/icons/icon-192x192.png',
+                badge: '/icons/icon-192x192.png',
+                tag: conTag ? datos.tag : undefined,
+                // Cada mensaje de chat vuelve a avisar (misma etiqueta: reemplaza, no apila). renotify exige tag.
+                renotify: conTag && esChat,
+                lang: 'es-MX',
+                data: { url: urlSegura(datos.url) },
+            });
+        })(),
     );
 });
 

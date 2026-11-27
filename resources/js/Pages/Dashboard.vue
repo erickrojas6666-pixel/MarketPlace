@@ -4,6 +4,8 @@ import { Head, Link, router, useForm, usePage } from '@inertiajs/vue3'
 import AuthenticatedLayout from '@/Layouts/AuthenticatedLayout.vue'
 import BuscadorUbicacion from '@/Components/BuscadorUbicacion.vue'
 import EvidenciaPedido from '@/Components/EvidenciaPedido.vue'
+import ChatPedido from '@/Components/ChatPedido.vue'
+import { usarNoLeidos } from '@/composables/useChat'
 import { useGeolocalizacion, redondear } from '@/composables/useGeolocalizacion'
 import { encolar, mostrarAviso } from '@/offline/sync'
 import { guardarDashboard } from '@/offline/snapshots'
@@ -34,6 +36,13 @@ const guardarCopiaLocal = () => {
   })
 }
 onMounted(guardarCopiaLocal)
+
+// Chat del pedido (RF-22): contador de mensajes sin leer y apertura directa desde el aviso
+// push, que lleva a /dashboard?chat=ID.
+usarNoLeidos()
+const chatInicial = typeof window !== 'undefined'
+  ? Number(new URLSearchParams(window.location.search).get('chat')) || null
+  : null
 watch(() => [props.pedidos, props.misPedidos, props.todosLosServicios], guardarCopiaLocal)
 
 // Única fuente de verdad: lo decide DashboardController (rol + perfil).
@@ -681,6 +690,7 @@ const marcarNotificacionesLeidas = () => {
               </div>
 
               <div class="flex flex-wrap gap-2 shrink-0">
+                <ChatPedido :pedido-id="p.id" :contraparte="p.cliente?.nombre" :abrir-inicial="chatInicial === p.id" />
                 <button
                   v-if="p.estado === 'pendiente'"
                   @click="cambiarEstadoPedido(p.id, 'aceptado')"
@@ -1022,6 +1032,11 @@ const marcarNotificacionesLeidas = () => {
               >
                 <p class="font-bold">{{ textoDisputa(p.disputa, true) }}</p>
                 <p v-if="p.disputa.resolucion_notas" class="mt-1 italic">Mediador: “{{ p.disputa.resolucion_notas }}”</p>
+              </div>
+
+              <!-- Chat con el prestador (RF-22) -->
+              <div class="pt-3 border-t border-slate-200">
+                <ChatPedido :pedido-id="p.id" :contraparte="p.servicio?.perfilPrestador?.user?.nombre" :abrir-inicial="chatInicial === p.id" />
               </div>
 
               <!-- Evidencia fotográfica (privada): cuando el trabajo ya empezó -->
