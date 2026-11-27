@@ -1,5 +1,5 @@
 <script setup>
-import { ref, watch, computed } from 'vue'
+import { ref, watch, computed, nextTick } from 'vue'
 import { Head, Link, router, usePage } from '@inertiajs/vue3'
 import AuthenticatedLayout from '@/Layouts/AuthenticatedLayout.vue'
 import AvatarUsuario from '@/Components/AvatarUsuario.vue'
@@ -48,6 +48,7 @@ const aplicarFiltros = () => {
   )
 }
 
+// Al escribir, la lista se filtra sola (con una pequeña pausa para no saturar al servidor).
 let temporizador = null
 watch(busqueda, () => {
   clearTimeout(temporizador)
@@ -56,6 +57,12 @@ watch(busqueda, () => {
 
 const seleccionarCategoria = (id) => {
   categoriaId.value = categoriaId.value === id ? null : id
+  aplicarFiltros()
+}
+
+const quitarCategoria = () => {
+  if (categoriaId.value === null) return
+  categoriaId.value = null
   aplicarFiltros()
 }
 
@@ -80,18 +87,52 @@ const quitarUbicacion = () => {
 
 const precioDe = (s) => s?.precio_base ?? null
 
-/* ---------- Ayudas visuales ---------- */
-const limpiarBusqueda = () => {
-  busqueda.value = ''
+/* ---------- Lupa: busca el texto cerca del usuario y sube la vista al mapa ---------- */
+const campoBusqueda = ref(null)
+const seccionGps = ref(null)
+
+const irAlMapa = async () => {
+  await nextTick()
+  seccionGps.value?.scrollIntoView({ behavior: 'smooth', block: 'start' })
 }
 
+const buscarCerca = async () => {
+  clearTimeout(temporizador) // evita que la búsqueda al escribir se repita
+  if (hayUbicacion.value) {
+    aplicarFiltros()
+  } else {
+    // Si todavía no hay permiso, el navegador lo pide aquí. Si lo niegan, el motivo
+    // queda en `errorUbicacion` y se muestra en el recuadro del GPS.
+    const pos = await obtener()
+    if (pos) fijarUbicacion(pos.lat, pos.lng)
+  }
+  irAlMapa()
+}
+
+const limpiarBusqueda = () => {
+  busqueda.value = ''
+  campoBusqueda.value?.focus()
+}
+
+/* ---------- Ayudas visuales ---------- */
 const nombrePrestador = (s) =>
   s?.perfil_prestador?.user?.nombre || s?.perfil_prestador?.user?.name || 'Prestador verificado'
 
-const iniciales = (texto) => {
-  const partes = String(texto || '?').trim().split(/\s+/)
-  return ((partes[0]?.[0] || '') + (partes[1]?.[0] || '')).toUpperCase() || '?'
-}
+const mensajeVacio = computed(() => {
+  if (hayUbicacion.value) {
+    return busqueda.value
+      ? `No encontramos «${busqueda.value}» cerca de ti. Prueba un radio mayor o cambia la búsqueda.`
+      : 'No encontramos prestadores que atiendan tu zona con esos filtros. Prueba un radio mayor.'
+  }
+  return 'No hay servicios disponibles con esos filtros en este momento.'
+})
+
+const claseChip = (activo) => [
+  'shrink-0 inline-flex items-center gap-2 px-3.5 py-2 rounded-full border-2 text-xs sm:text-sm font-bold transition-all duration-200 active:scale-95',
+  activo
+    ? 'bg-principal text-white border-principal shadow-md'
+    : 'bg-white text-principal border-slate-200 hover:border-principal/40 hover:bg-niebla/60',
+]
 
 const iconos = {
   buscar: 'M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z',
@@ -101,6 +142,49 @@ const iconos = {
   check: 'M5 13l4 4L19 7',
   candado: 'M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z',
   flecha: 'M13 7l5 5m0 0l-5 5m5-5H6',
+}
+
+// Íconos de las categorías (los mismos de la landing). Se eligen por el nombre de la categoría.
+const iconosCategoria = {
+  todas: [
+    'M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6z',
+    'M14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6z',
+    'M4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2z',
+    'M14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z',
+  ],
+  plomeria: [
+    'M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z',
+    'M12 18a3 3 0 0 1-3-3c0-1.5 3-4.5 3-4.5s3 3 3 4.5a3 3 0 0 1-3 3z',
+  ],
+  electricidad: ['M13 2L3 14h9l-1 8 10-12h-9l1-8z'],
+  cerrajeria: [
+    'M3 15.5a4.5 4.5 0 1 0 9 0a4.5 4.5 0 1 0-9 0',
+    'm10.7 12.3 8.8-8.8a1.5 1.5 0 0 1 2.1 0v0a1.5 1.5 0 0 1 0 2.1l-2.1 2.1 1.5 1.5-1.5 1.5-1.5-1.5-1.5 1.5-2.1-2.1',
+  ],
+  pintura: [
+    'M5 3h12a2 2 0 0 1 2 2v2a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z',
+    'M19 6h2a2 2 0 0 1 2 2v2a2 2 0 0 1-2 2h-9a2 2 0 0 0-2 2v3',
+    'M9 18a1 1 0 0 1 2 0v3a1 1 0 0 1-2 0v-3z',
+  ],
+  jardineria: [
+    'M12 22v-9',
+    'M12 13a6 6 0 0 0-6-6H3a6 6 0 0 1 6 6v0a6 6 0 0 0 3 0z',
+    'M12 13a6 6 0 0 1 6-6h3a6 6 0 0 0-6 6v0a6 6 0 0 1-3 0z',
+  ],
+}
+
+const iconoDe = (categoria) => {
+  const clave = String(categoria?.nombre || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+
+  if (clave.includes('cerraj')) return iconosCategoria.cerrajeria
+  if (clave.includes('electric')) return iconosCategoria.electricidad
+  if (clave.includes('jardin')) return iconosCategoria.jardineria
+  if (clave.includes('pintur')) return iconosCategoria.pintura
+  if (clave.includes('plomer')) return iconosCategoria.plomeria
+  return [iconos.etiqueta]
 }
 </script>
 
@@ -137,57 +221,113 @@ const iconos = {
         </div>
       </header>
 
-      <div class="py-10 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 space-y-8">
+      <div class="py-8 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 space-y-6">
 
-        <!-- ============ HERO ============ -->
-        <section class="relative overflow-hidden rounded-3xl bg-gradient-to-br from-principal via-principal to-[#1d4a8a] px-6 py-10 sm:py-14 shadow-xl shadow-principal/20 text-center">
-          <div class="absolute -top-16 -right-16 w-72 h-72 rounded-full bg-acento/20 blur-2xl"></div>
-          <div class="absolute -bottom-24 left-1/4 w-80 h-80 rounded-full bg-white/5"></div>
+        <!-- ============ BANNER (delgado) ============ -->
+        <section class="relative overflow-hidden rounded-3xl bg-gradient-to-br from-principal via-principal to-[#1d4a8a] px-6 py-6 sm:px-8 sm:py-7 shadow-xl shadow-principal/20">
+          <div class="absolute -top-16 -right-16 w-64 h-64 rounded-full bg-acento/20 blur-2xl"></div>
+          <div class="absolute -bottom-24 left-1/3 w-72 h-72 rounded-full bg-white/5"></div>
 
-          <div class="relative z-10 max-w-3xl mx-auto space-y-4">
-            <span class="inline-flex items-center gap-2 py-1.5 px-4 rounded-full bg-white/10 text-niebla text-xs font-bold tracking-wider uppercase border border-white/15">
-              <span class="w-2 h-2 rounded-full bg-acento animate-pulse"></span>
-              Catálogo de servicios
-            </span>
-
-            <h1 class="text-3xl sm:text-5xl font-extrabold text-white tracking-tight leading-tight">
+          <div class="relative z-10 space-y-1">
+            <h1 class="text-2xl sm:text-3xl font-extrabold text-white tracking-tight leading-tight">
               Encuentra a tu profesional <span class="text-acento">de confianza</span>
             </h1>
-
-            <p class="text-sm sm:text-base text-niebla/80">
+            <p class="text-sm text-niebla/80">
               Plomeros, electricistas, cerrajeros y más profesionales listos para atenderte en tu zona.
             </p>
           </div>
         </section>
 
-        <!-- ============ BUSCADOR ============ -->
-        <div class="flex items-center gap-2 bg-white p-2.5 rounded-2xl shadow-xl border border-slate-200">
-          <div class="flex-1 flex items-center px-3 gap-2">
-            <svg class="w-5 h-5 text-gray-400 shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" :d="iconos.buscar" />
-            </svg>
-            <input
-              v-model="busqueda"
-              type="text"
-              placeholder="Buscar por servicio o descripción..."
-              class="w-full border-0 focus:ring-0 text-grafito placeholder-gray-400 text-sm outline-none bg-transparent"
-            />
-          </div>
-          <button
-            v-if="busqueda"
-            type="button"
-            @click="limpiarBusqueda"
-            class="shrink-0 inline-flex items-center gap-1.5 px-4 py-2.5 bg-niebla hover:bg-niebla/70 text-principal text-xs font-bold rounded-xl transition active:scale-95"
-          >
-            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="3" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" :d="iconos.cerrar" />
-            </svg>
-            Limpiar
-          </button>
-        </div>
+        <!-- ============ BÚSQUEDA Y FILTROS ============ -->
+        <section class="bg-white rounded-3xl border-2 border-slate-200/90 shadow-md p-4 sm:p-5 space-y-4">
+          <div class="space-y-2">
+            <div class="flex items-center gap-2">
+              <div class="relative flex-1">
+                <input
+                  ref="campoBusqueda"
+                  v-model="busqueda"
+                  @keydown.enter.prevent="buscarCerca"
+                  type="text"
+                  placeholder="Buscar por servicio o descripción..."
+                  class="block w-full rounded-xl border-slate-300 focus:border-principal focus:ring-principal text-sm shadow-sm py-2.5 pl-4 pr-10 placeholder:text-slate-400"
+                />
+                <!-- Borra el texto (solo aparece cuando hay algo escrito) -->
+                <button
+                  v-if="busqueda"
+                  type="button"
+                  @click="limpiarBusqueda"
+                  class="absolute right-2 top-1/2 -translate-y-1/2 w-7 h-7 rounded-lg flex items-center justify-center text-gris-medio hover:bg-niebla hover:text-principal transition"
+                  aria-label="Borrar texto"
+                >
+                  <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" :d="iconos.cerrar" />
+                  </svg>
+                </button>
+              </div>
 
-        <!-- ============ CERCA DE MÍ ============ -->
-        <section class="bg-white rounded-3xl border-2 border-slate-200/90 shadow-md p-6 space-y-4">
+              <!-- Lupa: busca este texto cerca del usuario -->
+              <button
+                type="button"
+                @click="buscarCerca"
+                :disabled="ubicando"
+                title="Buscar cerca de mí"
+                aria-label="Buscar cerca de mí"
+                class="shrink-0 w-11 h-11 inline-flex items-center justify-center rounded-xl bg-principal text-acento shadow-md hover:bg-slate-800 transition-all duration-200 active:scale-95"
+                :class="{ 'opacity-50 cursor-not-allowed': ubicando }"
+              >
+                <svg v-if="ubicando" class="w-5 h-5 animate-spin" fill="none" viewBox="0 0 24 24">
+                  <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" />
+                  <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+                </svg>
+                <svg v-else class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" :d="iconos.buscar" />
+                </svg>
+              </button>
+            </div>
+
+            <p class="text-xs text-gris-medio">Con la lupa buscas este servicio cerca de ti.</p>
+          </div>
+
+          <!-- Categorías: filtran al hacer clic -->
+          <div class="flex flex-nowrap sm:flex-wrap gap-2 overflow-x-auto sm:overflow-visible -mx-1 px-1 pb-1">
+            <button type="button" @click="quitarCategoria" :class="claseChip(categoriaId === null)">
+              <svg
+                class="w-4 h-4"
+                :class="categoriaId === null ? 'text-acento' : 'text-principal'"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.8"
+                viewBox="0 0 24 24"
+              >
+                <path v-for="(d, i) in iconosCategoria.todas" :key="i" stroke-linecap="round" stroke-linejoin="round" :d="d" />
+              </svg>
+              Todas
+            </button>
+
+            <button
+              v-for="categoria in categorias"
+              :key="categoria.id"
+              type="button"
+              @click="seleccionarCategoria(categoria.id)"
+              :class="claseChip(categoriaId === categoria.id)"
+            >
+              <svg
+                class="w-4 h-4"
+                :class="categoriaId === categoria.id ? 'text-acento' : 'text-principal'"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.8"
+                viewBox="0 0 24 24"
+              >
+                <path v-for="(d, i) in iconoDe(categoria)" :key="i" stroke-linecap="round" stroke-linejoin="round" :d="d" />
+              </svg>
+              {{ categoria.nombre }}
+            </button>
+          </div>
+        </section>
+
+        <!-- ============ CERCA DE MÍ (GPS + mapa) ============ -->
+        <section ref="seccionGps" class="scroll-mt-24 bg-white rounded-3xl border-2 border-slate-200/90 shadow-md p-6 space-y-4">
           <div class="flex flex-wrap items-center gap-3">
             <button
               type="button"
@@ -262,67 +402,6 @@ const iconos = {
           </div>
         </section>
 
-        <!-- ============ CATEGORÍAS (filtran al hacer clic) ============ -->
-        <section class="space-y-4">
-          <div class="flex items-end justify-between gap-4">
-            <div>
-              <h2 class="text-2xl font-extrabold text-principal tracking-tight">Categorías</h2>
-              <p class="text-sm text-gris-medio mt-1">Elige un área para filtrar los servicios.</p>
-            </div>
-
-            <button
-              v-if="categoriaId"
-              type="button"
-              @click="seleccionarCategoria(categoriaId)"
-              class="inline-flex items-center gap-1.5 px-4 py-2 bg-white hover:bg-niebla text-principal text-xs font-bold rounded-xl border-2 border-slate-200 hover:border-principal/40 transition active:scale-95"
-            >
-              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="3" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" :d="iconos.cerrar" />
-              </svg>
-              Quitar filtro
-            </button>
-          </div>
-
-          <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4">
-            <button
-              v-for="categoria in categorias"
-              :key="categoria.id"
-              type="button"
-              @click="seleccionarCategoria(categoria.id)"
-              class="group text-left rounded-2xl p-5 border-2 shadow-md hover:shadow-xl hover:-translate-y-1 transition-all duration-300 flex flex-col gap-4"
-              :class="categoriaId === categoria.id
-                ? 'bg-principal border-principal'
-                : 'bg-white border-slate-200/90 hover:border-principal/40'"
-            >
-              <div
-                class="w-12 h-12 rounded-xl flex items-center justify-center transition-colors duration-300"
-                :class="categoriaId === categoria.id
-                  ? 'bg-white/15 text-acento'
-                  : 'bg-niebla border border-principal/15 text-principal group-hover:bg-principal group-hover:text-acento'"
-              >
-                <svg class="w-6 h-6" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" :d="iconos.etiqueta" />
-                </svg>
-              </div>
-
-              <div>
-                <span
-                  class="block font-extrabold text-sm sm:text-base"
-                  :class="categoriaId === categoria.id ? 'text-white' : 'text-principal'"
-                >
-                  {{ categoria.nombre }}
-                </span>
-                <span
-                  class="block text-xs mt-1 leading-relaxed line-clamp-2"
-                  :class="categoriaId === categoria.id ? 'text-niebla/80' : 'text-gris-medio'"
-                >
-                  {{ categoria.descripcion }}
-                </span>
-              </div>
-            </button>
-          </div>
-        </section>
-
         <!-- ============ LISTADO DE SERVICIOS ============ -->
         <section class="space-y-4">
           <div class="flex items-center justify-between gap-4">
@@ -344,9 +423,7 @@ const iconos = {
             </div>
             <p class="text-sm font-bold text-principal">Sin resultados</p>
             <p class="text-xs text-gris-medio mt-1 max-w-md">
-              {{ hayUbicacion
-                ? 'No encontramos prestadores que atiendan tu zona con esos filtros. Prueba un radio mayor.'
-                : 'No hay servicios disponibles con esos filtros en este momento.' }}
+              {{ mensajeVacio }}
             </p>
           </div>
 
